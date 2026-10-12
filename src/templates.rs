@@ -89,11 +89,43 @@ impl Template {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "StoredCatalog")]
 pub struct Catalog {
     version: u32,
     next_id: u64,
     pub items: Vec<Template>,
+    order: Vec<TemplateId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCatalog {
+    version: u32,
+    next_id: u64,
+    items: Vec<Template>,
+    // Absence means legacy listing order; an explicit null is invalid.
+    #[serde(default, deserialize_with = "present_order")]
+    order: Option<Vec<TemplateId>>,
+}
+
+fn present_order<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<TemplateId>>, D::Error> {
+    Vec::<TemplateId>::deserialize(deserializer).map(Some)
+}
+
+impl From<StoredCatalog> for Catalog {
+    fn from(stored: StoredCatalog) -> Self {
+        let order = stored
+            .order
+            .unwrap_or_else(|| stored.items.iter().map(|item| item.id).collect());
+        Self {
+            version: stored.version,
+            next_id: stored.next_id,
+            items: stored.items,
+            order,
+        }
+    }
 }
 
 impl Default for Catalog {
@@ -102,11 +134,20 @@ impl Default for Catalog {
             version: 1,
             next_id: 1,
             items: Vec::new(),
+            order: Vec::new(),
         }
     }
 }
 
 impl Catalog {
+    pub fn order(&self) -> &[TemplateId] {
+        &self.order
+    }
+
+    pub fn ordered(&self) -> impl Iterator<Item = &Template> {
+        self.order.iter().filter_map(|id| self.get(*id))
+    }
+
     pub fn get(&self, id: TemplateId) -> Option<&Template> {
         self.items.iter().find(|t| t.id == id)
     }
@@ -187,13 +228,91 @@ impl Catalog {
         let id = draft.id;
         let mut next_catalog = self.clone();
         next_catalog.items.push(draft.clone());
+        next_catalog.order.push(id);
         next_catalog.next_id = next;
+        let live: Vec<_> = tabs.items.iter().map(|tab| tab.id).collect();
+        next_catalog.order_from_neighbors(tabs, tab, id, &live)?;
         next_catalog.to_bytes()?;
         let source = tabs.get_mut(tab).unwrap();
         source.template = Some(id);
         source.identity = draft.identity.clone();
         *self = next_catalog;
         Ok(id)
+    }
+
+    /// Only the moved/saved template changes position. Closed templates and
+    /// all other entries retain their relative order; ordinary tabs are not
+    /// durable anchors. The next linked neighbor takes precedence.
+    fn order_from_neighbors(
+        &mut self,
+        tabs: &Tabs,
+        source: TabId,
+        template: TemplateId,
+        live: &[TabId],
+    ) -> Result<(), String> {
+        let position = live
+            .iter()
+            .position(|id| *id == source)
+            .ok_or("Dieser Tab ist nicht mehr geöffnet")?;
+        let pinned = tabs
+            .get(source)
+            .ok_or("Dieser Tab ist nicht mehr geöffnet")?
+            .pinned;
+        let linked = |id: &TabId| {
+            let tab = tabs.get(*id)?;
+            (tab.pinned == pinned).then_some(tab.template).flatten()
+        };
+        let next = live[position + 1..].iter().find_map(linked);
+        let previous = live[..position].iter().rev().find_map(linked);
+        if next.is_none() && previous.is_none() {
+            return Ok(());
+        }
+        self.order.retain(|id| *id != template);
+        let destination = if let Some(next) = next {
+            self.order
+                .iter()
+                .position(|id| *id == next)
+                .ok_or("Verknüpfte Nachbarvorlage nicht vorhanden")?
+        } else {
+            self.order
+                .iter()
+                .position(|id| Some(*id) == previous)
+                .ok_or("Verknüpfte Nachbarvorlage nicht vorhanden")?
+                + 1
+        };
+        self.order.insert(destination, template);
+        Ok(())
+    }
+
+    /// Validate the proposed live order and complete catalog before either
+    /// model changes. The returned bool means durable order needs saving.
+    pub fn move_tab(
+        &mut self,
+        tabs: &mut Tabs,
+        source: TabId,
+        target: TabId,
+        after: bool,
+    ) -> Result<bool, String> {
+        let destination = tabs.move_destination(source, target, after)?;
+        let from = tabs.items.iter().position(|tab| tab.id == source).unwrap();
+        if destination == from {
+            return Ok(false);
+        }
+        let mut next = self.clone();
+        if let Some(id) = tabs.get(source).unwrap().template {
+            if self.get(id).is_none() {
+                return Err("Verknüpfte Vorlage nicht vorhanden".into());
+            }
+            let mut live: Vec<_> = tabs.items.iter().map(|tab| tab.id).collect();
+            live.remove(from);
+            live.insert(destination, source);
+            next.order_from_neighbors(tabs, source, id, &live)?;
+            next.to_bytes()?;
+        }
+        let changed = next.order != self.order;
+        tabs.move_tab(source, target, after)?;
+        *self = next;
+        Ok(changed)
     }
 
     pub fn edit(&mut self, tabs: &mut Tabs, draft: Template) -> Result<(), String> {
@@ -313,6 +432,20 @@ impl Catalog {
         source.template = Some(id);
         source.identity = template.identity.clone();
         tabs.set_pinned(tab, template.pinned)?;
+        // Deliberate new opens follow saved ID order within the destination
+        // group, preserving every existing tab's relative position.
+        let index = self.order.iter().position(|id| *id == template.id).unwrap();
+        let open = |id: &TemplateId| {
+            tabs.items
+                .iter()
+                .find(|t| t.id != tab && t.template == Some(*id) && t.pinned == template.pinned)
+                .map(|t| t.id)
+        };
+        let successor = self.order[index + 1..].iter().find_map(open);
+        let predecessor = self.order[..index].iter().rev().find_map(open);
+        if let Some(target) = successor.or(predecessor) {
+            tabs.move_tab(tab, target, successor.is_none())?;
+        }
         Ok(tab)
     }
 
@@ -323,6 +456,7 @@ impl Catalog {
             .position(|t| t.id == id)
             .ok_or("Vorlage nicht mehr vorhanden")?;
         self.items.remove(index);
+        self.order.retain(|entry| *entry != id);
         for tab in &mut tabs.items {
             if tab.template == Some(id) {
                 tab.template = None;
@@ -363,6 +497,15 @@ impl Catalog {
         }
         if self.items.len() > MAX_TEMPLATES || self.next_id == 0 {
             return Err("Ungültige Vorlagenanzahl oder ID".into());
+        }
+        if self.order.len() != self.items.len()
+            || self
+                .order
+                .iter()
+                .enumerate()
+                .any(|(index, id)| self.get(*id).is_none() || self.order[..index].contains(id))
+        {
+            return Err("Vorlagenordnung enthält fehlende, doppelte oder unbekannte IDs".into());
         }
         for (i, template) in self.items.iter().enumerate() {
             template.validate()?;

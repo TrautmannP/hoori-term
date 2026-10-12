@@ -93,6 +93,11 @@ enum Message {
     StripWidth(f32),
     StripScroll(f32),
     StripHover(Option<tab_strip::Target>),
+    BeginTabDrag(TabId, iced::Point),
+    PreviewTabDrag(TabId, Option<tab_strip::DropTarget>, bool),
+    FinishTabDrag(TabId, bool),
+    CancelTabDrag,
+    MoveTab(TabId, tab_strip::DropTarget),
     ChooseShell(usize),
     CancelLaunch,
     Activate(hoori_term::tabs::TabId),
@@ -469,11 +474,16 @@ impl App {
                 self.observe_window()
             }
             window::Event::Resized(size) => {
+                self.strip.dragging = None;
                 self.viewport_height = size.height;
                 self.observe_window()
             }
-            window::Event::Rescaled(_) => self.observe_window(),
+            window::Event::Rescaled(_) => {
+                self.strip.dragging = None;
+                self.observe_window()
+            }
             window::Event::Unfocused => {
+                self.strip.dragging = None;
                 self.chrome.focused = false;
                 self.strip.focused = None;
                 self.strip.hovered = None;
@@ -488,6 +498,7 @@ impl App {
         if self.closing {
             return Task::none();
         }
+        self.strip.dragging = None;
         self.strip.focused = None;
         self.strip.hovered = None;
         if let WindowAction::Control(Control::Close) = action {
@@ -523,6 +534,7 @@ impl App {
         if self.closing {
             return Task::none();
         }
+        self.strip.dragging = None;
         if self.tabs.close_protected(target) {
             let CloseTarget::Tab(id) = target else {
                 unreachable!()
@@ -586,6 +598,12 @@ impl App {
             };
         }
         if self.closing {
+            return Task::none();
+        }
+        if self.strip.dragging.is_some() {
+            if key == Key::Named(Named::Escape) {
+                self.strip.dragging = None;
+            }
             return Task::none();
         }
         if let Some(selected) = self.launching {
@@ -696,11 +714,11 @@ impl App {
         if self.templates_open {
             let index = self
                 .catalog
-                .items
+                .order()
                 .iter()
-                .position(|t| Some(t.id) == self.selected_template)
+                .position(|id| Some(*id) == self.selected_template)
                 .unwrap_or(0);
-            let selected = self.catalog.items.get(index).map(|t| t.id);
+            let selected = self.catalog.order().get(index).copied();
             return match key {
                 Key::Named(Named::Escape) => self.update(Message::HideTemplates),
                 Key::Named(Named::ArrowUp | Named::ArrowDown | Named::Home | Named::End) => {
@@ -711,7 +729,7 @@ impl App {
                         Key::Named(Named::Home) => 0,
                         _ => last,
                     };
-                    self.selected_template = self.catalog.items.get(next).map(|t| t.id);
+                    self.selected_template = self.catalog.order().get(next).copied();
                     operation::snap_to(
                         "template-list",
                         operation::RelativeOffset {
@@ -742,6 +760,12 @@ impl App {
                 }
                 _ => Task::none(),
             };
+        }
+        if self.strip.focused.is_some()
+            && modifiers == keyboard::Modifiers::ALT
+            && matches!(key, Key::Named(Named::ArrowLeft | Named::ArrowRight))
+        {
+            return self.strip_keyboard(key, modifiers);
         }
         if let Some(action) = shortcuts::builtin(&key, modifiers) {
             return self.action(action);
@@ -832,9 +856,9 @@ impl App {
         }
         let index = self
             .catalog
-            .items
+            .order()
             .iter()
-            .position(|t| Some(t.id) == self.selected_template)
+            .position(|id| Some(*id) == self.selected_template)
             .unwrap_or(0);
         let last = self.catalog.items.len().saturating_sub(1);
         operation::snap_to(
@@ -857,6 +881,32 @@ impl App {
     ) -> Task<Message> {
         use keyboard::{Key, key::Named};
         use tab_strip::Target;
+        if modifiers == keyboard::Modifiers::ALT
+            && matches!(key, Key::Named(Named::ArrowLeft | Named::ArrowRight))
+        {
+            if let Some(Target::Tab(id) | Target::Close(id)) = self.strip.focused
+                && let Some(index) = self.tabs.items.iter().position(|tab| tab.id == id)
+            {
+                let after = key == Key::Named(Named::ArrowRight);
+                let neighbor = if after {
+                    index.checked_add(1)
+                } else {
+                    index.checked_sub(1)
+                };
+                if let Some(target) = neighbor.and_then(|index| self.tabs.items.get(index))
+                    && target.pinned == self.tabs.items[index].pinned
+                {
+                    return self.update(Message::MoveTab(
+                        id,
+                        tab_strip::DropTarget {
+                            tab: target.id,
+                            after,
+                        },
+                    ));
+                }
+            }
+            return Task::none();
+        }
         match key {
             Key::Named(Named::Escape) => self.strip.focused = None,
             Key::Named(Named::Tab) => self.strip.traverse(&self.tabs, modifiers.shift()),
@@ -911,6 +961,31 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        if self.confirming.is_some()
+            || self.editing.is_some()
+            || self.launching.is_some()
+            || self.templates_open
+            || self.closing
+            || self
+                .strip
+                .dragging
+                .as_ref()
+                .is_some_and(|drag| self.tabs.get(drag.source).is_none())
+            || matches!(
+                message,
+                Message::Open(_)
+                    | Message::Activate(_)
+                    | Message::SetPinned(..)
+                    | Message::SetCompact(..)
+                    | Message::Edit(_)
+                    | Message::ShowTemplates
+                    | Message::SaveTemplate(_)
+                    | Message::Close(_)
+                    | Message::OpenTemplate(_)
+            )
+        {
+            self.strip.dragging = None;
+        }
         // Native window handling remains available on modal surfaces, just
         // like the OS close action. It never enters terminal key encoding.
         match message {
@@ -1059,11 +1134,69 @@ impl App {
                 }
             }
             Message::StripWidth(width) => {
+                self.strip.dragging = None;
                 self.strip.width = width;
                 self.reveal_active();
             }
-            Message::StripScroll(delta) => self.strip.scroll(&self.tabs, delta),
+            Message::StripScroll(delta) => {
+                self.strip.scroll(&self.tabs, delta);
+                if let Some(drag) = &mut self.strip.dragging {
+                    drag.target = None;
+                }
+            }
             Message::StripHover(target) => self.strip.hovered = target,
+            Message::BeginTabDrag(source, origin) => {
+                if self.tabs.get(source).is_some() {
+                    self.strip.dragging = Some(tab_strip::TabDrag {
+                        source,
+                        origin,
+                        moved: false,
+                        target: None,
+                    });
+                    self.strip.hovered = None;
+                }
+            }
+            Message::PreviewTabDrag(source, target, moved) => {
+                if let Some(drag) = &mut self.strip.dragging
+                    && drag.source == source
+                {
+                    drag.moved |= moved;
+                    drag.target = target;
+                }
+            }
+            Message::FinishTabDrag(source, valid) => {
+                if let Some(drag) = self
+                    .strip
+                    .dragging
+                    .take()
+                    .filter(|drag| drag.source == source)
+                    && valid
+                {
+                    if drag.moved {
+                        if let Some(target) = drag.target {
+                            return self.update(Message::MoveTab(source, target));
+                        }
+                    } else {
+                        return self.update(Message::Strip(tab_strip::Target::Tab(source)));
+                    }
+                }
+            }
+            Message::CancelTabDrag => self.strip.dragging = None,
+            Message::MoveTab(source, target) => {
+                match self
+                    .catalog
+                    .move_tab(&mut self.tabs, source, target.tab, target.after)
+                {
+                    Ok(durable) => {
+                        self.error = None;
+                        self.strip.reveal(&self.tabs, source);
+                        if durable {
+                            return self.persist_changed();
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Message::ChooseShell(index) => {
                 // Only an explicit choice from the currently open menu starts
                 // a session; stale/repeated choice messages cannot start twice.
@@ -1330,7 +1463,7 @@ impl App {
                     .selected_template
                     .is_some_and(|id| self.catalog.get(id).is_some())
                 {
-                    self.selected_template = self.catalog.items.first().map(|t| t.id);
+                    self.selected_template = self.catalog.order().first().copied();
                 }
                 return self.reveal_template_selection();
             }
@@ -1378,7 +1511,7 @@ impl App {
                 if self.templates_loaded {
                     self.error = self.catalog.remove(&mut self.tabs, id).err();
                     if self.error.is_none() {
-                        self.selected_template = self.catalog.items.first().map(|t| t.id);
+                        self.selected_template = self.catalog.order().first().copied();
                         let persist = self.persist_changed();
                         return Task::batch([persist, self.reveal_template_selection()]);
                     }
@@ -1514,11 +1647,11 @@ impl App {
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
             Some(tab_strip::Target::Window(control)) => format!("{} · Strg+Umschalt+L, Umschalt+Tab: Fensterknöpfe", control.label(self.chrome.maximized)),
             Some(tab_strip::Target::Drag) => format!("{}\nZiehen: Fenster bewegen · Doppelklick: maximieren/wiederherstellen", build_info::metadata()),
-            None => "Tableiste/Fensterknöpfe: Strg+Umschalt+L · Tab/Umschalt+Tab navigieren · C Ansicht umschalten · E bearbeiten · Esc zurück zum Terminal".into(),
+            None => "Tabs im eigenen Bereich ziehen · Esc: abbrechen · Mausrad beim Ziehen: Überlauf\nStrg+Umschalt+L: Tableiste · Alt+Links/Rechts: verschieben · C: Ansicht · E: bearbeiten · Esc: Terminal".into(),
         };
         // Removing the tooltip widget also removes an already visible overlay.
         // A longer delay only affects a future hover and leaves it on dialogs.
-        let header: Element<'_, Message> = if interactive {
+        let header: Element<'_, Message> = if interactive && self.strip.dragging.is_none() {
             tooltip(
                 header,
                 container(text(inspection).size(12).width(420))
@@ -1538,7 +1671,7 @@ impl App {
         {
             content = content.push(container(column![
                 text(self.inspect_tab(id, matches!(target, tab_strip::Target::Close(_)))).size(13),
-                text("Tab/Umschalt+Tab oder Pfeile: Details wählen · C: normal/kompakt · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
+                text("Pfeile: Details · Alt+Links/Rechts: im Bereich verschieben · C: Ansicht · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
             ].spacing(4)).padding([6, 10]).width(Fill).style(container::rounded_box));
         }
         let storage_status = if self.templates_loading {
@@ -1798,7 +1931,7 @@ impl App {
 
     fn templates_view(&self) -> Element<'_, Message> {
         let mut entries = column![].spacing(6);
-        for template in &self.catalog.items {
+        for template in self.catalog.ordered() {
             let id = template.id;
             let link = self.tabs.items.iter().find(|t| t.template == Some(id));
             let state = match link.map(|t| t.state()) {
@@ -2247,6 +2380,132 @@ mod tests {
     }
 
     #[test]
+    fn drag_and_keyboard_reorder_match_in_both_groups_and_invalid_gestures_do_not_move_neighbors() {
+        use tab_strip::{DropTarget, Target};
+        let setup = || {
+            let mut app = app();
+            for _ in 1..12 {
+                let _ = app.update(Message::Open(app.default_shell.clone()));
+            }
+            for id in [TabId(1), TabId(2), TabId(3), TabId(4)] {
+                let _ = app.update(Message::SetPinned(id, true));
+            }
+            app
+        };
+        let mut mouse = setup();
+        let mut keyboard = setup();
+        let ids = |app: &App| app.tabs.items.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let origin = iced::Point::new(100.0, 25.0);
+        for (source, target) in [(TabId(4), TabId(3)), (TabId(10), TabId(9))] {
+            let _ = mouse.update(Message::BeginTabDrag(source, origin));
+            let _ = mouse.update(Message::PreviewTabDrag(
+                source,
+                Some(DropTarget {
+                    tab: target,
+                    after: false,
+                }),
+                true,
+            ));
+            let _ = mouse.update(Message::FinishTabDrag(source, true));
+            keyboard.strip.focused = Some(Target::Tab(source));
+            let _ = keyboard.keyboard(
+                Key::Named(keyboard::key::Named::ArrowLeft),
+                Modifiers::ALT,
+                None,
+            );
+            assert_eq!(ids(&mouse), ids(&keyboard));
+            assert_eq!(mouse.tabs.active, Some(TabId(12)));
+            assert_eq!(keyboard.tabs.active, mouse.tabs.active);
+            assert_eq!(keyboard.strip.focused, Some(Target::Tab(source)));
+        }
+        let before = ids(&mouse);
+        for target in [
+            None,
+            Some(DropTarget {
+                tab: TabId(1),
+                after: true,
+            }),
+            Some(DropTarget {
+                tab: TabId(999),
+                after: false,
+            }),
+        ] {
+            let _ = mouse.update(Message::BeginTabDrag(TabId(10), origin));
+            let _ = mouse.update(Message::PreviewTabDrag(TabId(10), target, true));
+            let _ = mouse.update(Message::FinishTabDrag(TabId(10), true));
+            assert_eq!(ids(&mouse), before);
+        }
+        for cancel in [
+            Message::CancelTabDrag,
+            Message::StripWidth(640.0),
+            Message::Strip(tab_strip::Target::Plus),
+        ] {
+            let _ = mouse.update(Message::BeginTabDrag(TabId(10), origin));
+            let _ = mouse.update(Message::PreviewTabDrag(
+                TabId(10),
+                Some(DropTarget {
+                    tab: TabId(5),
+                    after: false,
+                }),
+                true,
+            ));
+            let _ = mouse.update(cancel);
+            let _ = mouse.update(Message::FinishTabDrag(TabId(10), true));
+            assert_eq!(ids(&mouse), before);
+            if mouse.launching.is_some() {
+                let _ = mouse.update(Message::CancelLaunch);
+            }
+        }
+        let _ = mouse.update(Message::BeginTabDrag(TabId(10), origin));
+        let _ = mouse.update(Message::PreviewTabDrag(
+            TabId(10),
+            Some(DropTarget {
+                tab: TabId(5),
+                after: false,
+            }),
+            true,
+        ));
+        let _ = mouse.update(Message::StripScroll(100.0));
+        assert!(mouse.strip.dragging.as_ref().unwrap().target.is_none());
+        let _ = mouse.update(Message::FinishTabDrag(TabId(10), true));
+        assert_eq!(ids(&mouse), before); // Scroll needs a fresh preview before release.
+        let _ = mouse.update(Message::BeginTabDrag(TabId(10), origin));
+        let _ = mouse.update(Message::PreviewTabDrag(
+            TabId(10),
+            Some(DropTarget {
+                tab: TabId(9),
+                after: false,
+            }),
+            true,
+        ));
+        mouse.tabs.remove(CloseTarget::Tab(TabId(9)));
+        let after_close = ids(&mouse);
+        let _ = mouse.update(Message::FinishTabDrag(TabId(10), true));
+        assert_eq!(ids(&mouse), after_close);
+        let _ = mouse.update(Message::BeginTabDrag(TabId(10), origin));
+        mouse.tabs.remove(CloseTarget::Tab(TabId(10)));
+        let after_close = ids(&mouse);
+        let _ = mouse.update(Message::FinishTabDrag(TabId(10), true));
+        assert_eq!(ids(&mouse), after_close);
+        assert_eq!(mouse.tabs.active, Some(TabId(12)));
+        keyboard.strip.focused = Some(Target::Tab(TabId(1)));
+        let before = ids(&keyboard);
+        let _ = keyboard.keyboard(
+            Key::Named(keyboard::key::Named::ArrowLeft),
+            Modifiers::ALT,
+            None,
+        );
+        assert_eq!(ids(&keyboard), before); // Group endpoint does not wrap or unpin.
+        keyboard.strip.focused = Some(Target::Tab(TabId(5)));
+        let _ = keyboard.keyboard(
+            Key::Named(keyboard::key::Named::ArrowLeft),
+            Modifiers::ALT,
+            None,
+        );
+        assert_eq!(ids(&keyboard), before); // First ordinary tab cannot enter the pin group.
+    }
+
+    #[test]
     fn invalid_shell_is_visible_and_close_needs_no_confirmation() {
         let mut app = App::new(Options {
             shell: "/nonexistent/hoori-test-shell".into(),
@@ -2418,6 +2677,56 @@ mod tests {
         let _ = app.update(Message::SetCompact(first, true)); // Mouse action route.
         assert!(app.tabs.get(first).unwrap().identity.compact);
         assert!(app.catalog.items[0].identity.compact);
+        let order = |app: &App| app.tabs.items.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let identities = [
+            app.tabs.get(first).unwrap().identity.clone(),
+            app.tabs.get(second).unwrap().identity.clone(),
+        ];
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::ArrowLeft),
+            Modifiers::ALT,
+            None,
+        );
+        assert_eq!(order(&app), [second, first]);
+        assert_eq!(app.tabs.active, Some(first));
+        assert_eq!(app.strip.focused, Some(tab_strip::Target::Tab(second)));
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::ArrowRight),
+            Modifiers::ALT,
+            None,
+        );
+        assert_eq!(order(&app), [first, second]);
+        let origin = iced::Point::new(240.0, 20.0);
+        let target = tab_strip::DropTarget {
+            tab: first,
+            after: false,
+        };
+        let _ = app.update(Message::BeginTabDrag(second, origin));
+        let _ = app.update(Message::PreviewTabDrag(second, Some(target), true));
+        let _ = app.update(Message::FinishTabDrag(second, true));
+        assert_eq!(order(&app), [second, first]); // Same result as the keyboard action.
+        let _ = app.update(Message::FinishTabDrag(second, true));
+        assert_eq!(order(&app), [second, first]); // One consumption per gesture.
+        let _ = app.update(Message::MoveTab(
+            second,
+            tab_strip::DropTarget {
+                tab: first,
+                after: true,
+            },
+        ));
+        let _ = app.update(Message::BeginTabDrag(second, origin));
+        let _ = app.update(Message::PreviewTabDrag(second, Some(target), true));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        let _ = app.update(Message::FinishTabDrag(second, true));
+        assert_eq!(order(&app), [first, second]);
+        assert_eq!(app.tabs.active, Some(first));
+        assert_eq!(
+            [
+                app.tabs.get(first).unwrap().identity.clone(),
+                app.tabs.get(second).unwrap().identity.clone()
+            ],
+            identities
+        );
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
         assert_eq!(app.tabs.active, Some(second));
         assert!(app.strip.focused.is_none());

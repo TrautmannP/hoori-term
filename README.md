@@ -11,6 +11,8 @@ An optional built-in symbol adds another visual identity cue and is saved with
 explicit templates; no icon font or downloaded resource is required.
 Each tab can independently use a compact symbol view; pinning stays a separate
 property. Saved templates retain the selected presentation.
+Tabs can be reordered within their pin/ordinary group. Linked tabs carry the
+saved template order; ordinary tabs remain temporary.
 
 ## Run
 
@@ -34,6 +36,7 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | New session using the launch shell/arguments | Ctrl+Shift+T |
 | New Bash session | Ctrl+Shift+B |
 | Focus the tab strip / window controls | Ctrl+Shift+L |
+| Reorder a tab within its pin/ordinary group | Drag its body; or Ctrl+Shift+L, focus a tab, Alt+Left/Right |
 | Move / maximize or restore window | Drag / double-click the dotted build-hash area |
 | Resize window | Drag a window edge or corner |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
@@ -168,6 +171,8 @@ The [symbol validation](docs/hoo-22-symbols.md) covers the original native catal
 keyboard/mouse selection, optional stable IDs and targeted GUI/storage evidence.
 The [compact-view validation](docs/hoo-24-compact.md) covers independent pin/view
 combinations, mixed-width geometry, full details and stored presentation.
+The [tab-order validation](docs/hoo-26-order.md) defines deliberate drag/keyboard
+reordering, stable saved neighbors, reopening, legacy data and targeted evidence.
 
 ## Versioned review builds
 
