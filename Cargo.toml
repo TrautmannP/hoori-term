@@ -1,0 +1,23 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "hoori-term"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+build = "build.rs"
+
+[dependencies]
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "canvas", "tokio", "x11", "wayland"] }
+portable-pty = "=0.9.0"
+tokio = { version = "1.53", features = ["time"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["fs", "signal", "process"] }
+
+[profile.release]
+strip = "debuginfo"
