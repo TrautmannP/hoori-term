@@ -6,7 +6,6 @@ Inspect every PNG independently. IDs/PIDs/order/bytes do not prove rendering.
 """
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -35,6 +34,8 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--only', choices=['all', 'live', 'restart', 'errors'], default='all')
     parser.add_argument('--catalog-from', type=Path)
+    parser.add_argument('--resume-live-after-baseline', action='store_true',
+                        help='Retain already inspected baseline photos from an earlier attempt')
     a = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11'
     binary, output = a.binary.resolve(), a.output.resolve()
@@ -51,6 +52,8 @@ def main():
     assert 'dirty: false' in metadata
     commit = re.search(r'commit: ([0-9a-f]{40})', metadata).group(1)
     report = {'commit': commit, 'metadata': metadata, 'scope': a.only,
+              'baseline_photos_carried_from_previous_attempt': a.resume_live_after_baseline,
+              'synthetic_x11_wheel_pixels_per_click': 160,
               'catalog_from': str(a.catalog_from) if a.catalog_from else None,
               'display': os.environ.get('DISPLAY'), 'session_type': os.environ.get('XDG_SESSION_TYPE'),
               'os': Path('/etc/os-release').read_text(), 'logical_sizes': [], 'phases': [],
@@ -187,10 +190,14 @@ def main():
                 tx0, target_width = positions[target]
                 wanted = min(max(0, tx0 + target_width / 2 - viewport / 2), maximum)
                 delta = wanted - offset
-                steps = math.ceil(abs(delta) / 80)
+                # The pinned winit X11 backend reports a scroll for both
+                # XTEST wheel press and release: 2 * 80 pixels per click.
+                # Center the target with the nearest click so either half
+                # stays reachable even in the 248px minimum viewport.
+                steps = round(abs(delta) / 160)
                 if steps:
                     command('xdotool', 'click', '--repeat', str(steps), '--delay', '80', '5' if delta > 0 else '4')
-                    offset = min(max(0, offset + (80 * steps if delta > 0 else -80 * steps)), maximum)
+                    offset = min(max(0, offset + (160 * steps if delta > 0 else -160 * steps)), maximum)
                     time.sleep(.15)
                 center = left + tx0 - offset + target_width / 2
                 tx = min(max(center + (24 if after else -24), left + 4), left + viewport - 4)
@@ -202,7 +209,9 @@ def main():
             if image:
                 shot(w, image, keep_pointer=True)
             if cancel:
-                w.key('Escape')
+                # --clearmodifiers also releases mouse buttons. Preserve the
+                # held left button until after Escape, as a physical user does.
+                command('xdotool', 'key', 'Escape')
                 time.sleep(.1)
         finally:
             command('xdotool', 'mouseup', '1')
@@ -303,9 +312,11 @@ finally:
             report['legacy_load_open_does_not_rewrite_file_or_autostart'] = True
             focus_id(w, live, 2)
             w.key('Return')
-            shot(w, '01-twelve-mixed-tabs-wide-front.png')
+            if not a.resume_live_after_baseline:
+                shot(w, '01-twelve-mixed-tabs-wide-front.png')
             sized(w, 640)
-            shot(w, '02-twelve-mixed-tabs-narrow-front.png')
+            if not a.resume_live_after_baseline:
+                shot(w, '02-twelve-mixed-tabs-narrow-front.png')
             activate(w, 'F12', 12)
             native_before = geometry(w)
             for options in [dict(target=3, after=True, cancel=True, image='03-narrow-valid-preview-escape.png'),
