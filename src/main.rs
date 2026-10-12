@@ -726,20 +726,22 @@ impl App {
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
             None => "Tableiste: Strg+Umschalt+L · Pfeile/Tab navigieren · Enter auswählen · Esc zurück zum Terminal".into(),
         };
-        let mut content = column![
+        // Removing the tooltip widget also removes an already visible overlay.
+        // A longer delay only affects a future hover and leaves it on dialogs.
+        let header: Element<'_, Message> = if interactive {
             tooltip(
                 header,
                 container(text(inspection).size(12).width(420))
                     .padding(8)
                     .style(container::rounded_box),
-                tooltip::Position::Bottom
+                tooltip::Position::Bottom,
             )
-            .delay(std::time::Duration::from_millis(if interactive {
-                600
-            } else {
-                60_000
-            }))
-        ];
+            .delay(std::time::Duration::from_millis(600))
+            .into()
+        } else {
+            header.into()
+        };
+        let mut content = column![header];
         if let Some(selected) = self.launching {
             let choice = |label: &'static str, index: usize, message: Message| {
                 button(label).on_press(message).style(move |theme, status| {

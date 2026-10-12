@@ -39,6 +39,8 @@ impl State {
 
     pub fn scroll(&mut self, count: usize, delta: f32) {
         self.offset = (self.offset + delta).clamp(0.0, self.layout(count).max_offset);
+        // Layout/navigation can move the old target without a pointer event.
+        self.hovered = None;
     }
 
     pub fn reveal(&mut self, tabs: &Tabs, id: TabId) {
