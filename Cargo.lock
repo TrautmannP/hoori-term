@@ -1007,6 +1007,7 @@ dependencies = [
  "nix 0.29.0",
  "portable-pty",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

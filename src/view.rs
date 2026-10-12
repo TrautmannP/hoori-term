@@ -10,7 +10,7 @@ use iced::{Color, Event, Font, Point, Rectangle, Renderer, Size, Theme, mouse};
 const CELL_WIDTH: f32 = 10.0;
 const CELL_HEIGHT: f32 = 20.0;
 const MARGIN: f32 = 10.0;
-const BACKGROUND: Color = Color::from_rgb8(22, 24, 35);
+pub(crate) const BACKGROUND: Color = Color::from_rgb8(22, 24, 35);
 const FOREGROUND: Color = Color::from_rgb8(220, 224, 235);
 
 pub struct TerminalView<'a> {
