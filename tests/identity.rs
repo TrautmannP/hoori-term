@@ -121,3 +121,49 @@ fn conflicting_or_invalid_edits_leave_all_existing_settings_intact() {
     tabs.remove(CloseTarget::Tab(second));
     assert!(tabs.configure(second, "Closed", Accent::Red, None).is_err());
 }
+
+#[test]
+fn pin_groups_move_only_the_target_and_normal_close_cannot_remove_it() {
+    let mut tabs = Tabs::default();
+    let ids: Vec<_> = (0..5).map(|_| open(&mut tabs)).collect();
+    let target = ids[2];
+    let key = Key::Named(Named::F8);
+    tabs.configure(
+        target,
+        "Backend",
+        Accent::Green,
+        Some(shortcut(key.clone(), Modifiers::empty())),
+    )
+    .unwrap();
+    tabs.get_mut(target)
+        .unwrap()
+        .terminal
+        .feed(b"retained\x1b]2;still here\x07");
+    let identity = tabs.get(target).unwrap().identity.clone();
+    let order = |tabs: &Tabs| tabs.items.iter().map(|tab| tab.id).collect::<Vec<_>>();
+    tabs.set_pinned(target, true).unwrap();
+    tabs.set_pinned(ids[4], true).unwrap();
+    assert_eq!(order(&tabs), [target, ids[4], ids[0], ids[1], ids[3]]);
+    tabs.set_pinned(target, true).unwrap(); // No change preserves its position.
+    assert_eq!(order(&tabs), [target, ids[4], ids[0], ids[1], ids[3]]);
+    assert_eq!(tabs.pinned_count(), 2);
+    assert_eq!(tabs.active, Some(ids[4]));
+    assert_eq!(tabs.get(target).unwrap().identity, identity);
+    assert_eq!(tabs.shortcut_target(&key, Modifiers::empty()), Some(target));
+    assert_eq!(tabs.get(target).unwrap().terminal.shell_title, "still here");
+    assert!(tabs.close_protected(CloseTarget::Tab(target)));
+    assert!(!tabs.close_protected(CloseTarget::PinnedTab(target)));
+    // Even failed/exited transports have normal close protection.
+    tabs.remove(CloseTarget::Tab(target));
+    assert!(tabs.get(target).is_some());
+    tabs.set_pinned(target, false).unwrap();
+    assert_eq!(order(&tabs), [ids[4], ids[0], ids[1], ids[3], target]);
+    tabs.remove(CloseTarget::Tab(target));
+    assert!(tabs.get(target).is_none());
+    tabs.remove(CloseTarget::PinnedTab(ids[4]));
+    assert!(tabs.get(ids[4]).is_none());
+    assert_eq!(order(&tabs), [ids[0], ids[1], ids[3]]);
+    tabs.set_pinned(ids[1], true).unwrap();
+    tabs.remove(CloseTarget::Window);
+    assert!(tabs.items.is_empty()); // Window close deliberately includes pins.
+}

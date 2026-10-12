@@ -95,6 +95,7 @@ enum Message {
     CancelLaunch,
     Activate(hoori_term::tabs::TabId),
     Close(hoori_term::tabs::CloseTarget),
+    SetPinned(TabId, bool),
     Select {
         id: hoori_term::tabs::TabId,
         row: usize,
@@ -150,6 +151,7 @@ struct TabEditor {
     error: Option<String>,
     shell: TemplateShell,
     directory: String,
+    pinned: bool,
 }
 
 impl TabEditor {
@@ -168,6 +170,7 @@ impl TabEditor {
             },
             shell: self.shell,
             directory: self.directory.clone(),
+            pinned: self.pinned,
         })
     }
 }
@@ -341,6 +344,7 @@ impl App {
             },
             accent: tab.identity.accent,
             shortcut: tab.identity.shortcut.clone(),
+            pinned: tab.pinned,
             recording: false,
             error: None,
             shell: TemplateShell::for_shell(&tab.shell),
@@ -489,6 +493,19 @@ impl App {
 
     fn request_close(&mut self, target: CloseTarget) -> Task<Message> {
         if self.closing {
+            return Task::none();
+        }
+        if self.tabs.close_protected(target) {
+            let CloseTarget::Tab(id) = target else {
+                unreachable!()
+            };
+            self.error = self.tabs.get(id).map(|tab| {
+                format!(
+                    "„{}“ ist angepinnt. Erst entpinnen oder „Angepinnten Tab schließen“ wählen.",
+                    tab.description()
+                )
+            });
+            self.strip.focused = None;
             return Task::none();
         }
         self.editing = None;
@@ -938,8 +955,8 @@ impl App {
                         return self.update(Message::Activate(id));
                     }
                     Target::Close(id) => return self.update(Message::Close(CloseTarget::Tab(id))),
-                    Target::Previous => self.strip.scroll(self.tabs.items.len(), -224.0),
-                    Target::Next => self.strip.scroll(self.tabs.items.len(), 224.0),
+                    Target::Previous => self.strip.scroll(&self.tabs, -224.0),
+                    Target::Next => self.strip.scroll(&self.tabs, 224.0),
                     Target::Plus => {
                         self.launching = Some(0);
                         self.strip.focused = None;
@@ -954,7 +971,7 @@ impl App {
                 self.strip.width = width;
                 self.reveal_active();
             }
-            Message::StripScroll(delta) => self.strip.scroll(self.tabs.items.len(), delta),
+            Message::StripScroll(delta) => self.strip.scroll(&self.tabs, delta),
             Message::StripHover(target) => self.strip.hovered = target,
             Message::ChooseShell(index) => {
                 // Only an explicit choice from the currently open menu starts
@@ -969,6 +986,19 @@ impl App {
             }
             Message::CancelLaunch => self.launching = None,
             Message::Close(target) => return self.request_close(target),
+            Message::SetPinned(id, pinned) => {
+                match self.catalog.set_pinned(&mut self.tabs, id, pinned) {
+                    Ok(linked) => {
+                        self.error = None;
+                        self.strip.focused = None;
+                        self.reveal_active();
+                        if linked {
+                            return self.persist_changed();
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Message::Event(Event::Window(window::Event::CloseRequested), _) => {
                 return self.request_close(CloseTarget::Window);
             }
@@ -1200,6 +1230,7 @@ impl App {
                         error: None,
                         shell: template.shell,
                         directory: template.directory.clone(),
+                        pinned: template.pinned,
                     });
                     return operation::focus("tab-name");
                 }
@@ -1297,7 +1328,7 @@ impl App {
         let inspection = match self.strip.hovered {
             Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.tabs.get(id).map(|tab| {
                 let shortcut = tab.identity.shortcut.as_ref().map(|s| format!(" · {}", s.label())).unwrap_or_default();
-                format!("{}{}{}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut)
+                format!("{}{}{}{}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut, if tab.pinned { " · angepinnt, normales Schließen geschützt" } else { "" })
             }).unwrap_or_default(),
             Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
@@ -1332,7 +1363,7 @@ impl App {
         } else {
             "Vorlagen bereit · kein automatischer Start"
         };
-        let template_toolbar = container(
+        let mut template_toolbar = column![
             row![
                 button(text("Vorlagen · Strg+Umschalt+P").size(12))
                     .on_press_maybe(interactive.then_some(Message::ShowTemplates)),
@@ -1355,8 +1386,39 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Center),
-        )
-        .padding([4, 8]);
+        ]
+        .spacing(4);
+        if let Some(tab) = self.tabs.current() {
+            template_toolbar = template_toolbar.push(
+                row![
+                    button(
+                        text(if tab.pinned {
+                            "Tab entpinnen"
+                        } else {
+                            "Tab anpinnen"
+                        })
+                        .size(12)
+                    )
+                    .on_press_maybe(interactive.then_some(Message::SetPinned(tab.id, !tab.pinned))),
+                    button(text("Angepinnten Tab schließen").size(12))
+                        .style(button::danger)
+                        .on_press_maybe(
+                            (interactive && tab.pinned)
+                                .then_some(Message::Close(CloseTarget::PinnedTab(tab.id)))
+                        ),
+                    text(if tab.pinned {
+                        "PIN · normales Schließen geschützt"
+                    } else {
+                        "Gewöhnlicher Tab"
+                    })
+                    .size(12)
+                    .width(Fill),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+        }
+        let template_toolbar = container(template_toolbar).padding([4, 8]);
         if let Some(error) = &self.storage_error {
             content = content.push(
                 container(
@@ -1447,7 +1509,7 @@ impl App {
                 .width(Fill)
                 .height(Fill),
             );
-            if let Some(error) = tab.error.as_ref().or(self.error.as_ref()) {
+            if let Some(error) = self.error.as_ref().or(tab.error.as_ref()) {
                 content = content.push(container(text(error).size(14)).padding(8));
             }
             content = content.push(template_toolbar);
@@ -1558,8 +1620,9 @@ impl App {
                         ]
                         .spacing(8),
                         text(format!(
-                            "{} · {shortcut} · {state} · {directory}",
-                            template.shell.label()
+                            "{} · {}{shortcut} · {state} · {directory}",
+                            template.shell.label(),
+                            if template.pinned { "PIN · " } else { "" }
                         ))
                         .size(12),
                     ]
@@ -1653,6 +1716,14 @@ impl App {
             .push(row![text("Verzeichnis").size(14).width(90),text_input("Absolutes Startverzeichnis",&editor.directory).id("template-directory").on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String)->Message)).size(14).padding(8)].spacing(8).align_y(iced::Center))
             .push(text("Startziel und Verzeichnis gelten beim nächsten neuen Prozess. Offene Tabs werden nicht neu gestartet.").size(12));
         }
+        fields = fields.push(
+            text(if editor.pinned {
+                "PIN · angepinnt. Beim zugehörigen Tab bewusst entpinnen."
+            } else {
+                "Nicht angepinnt. Beim zugehörigen Tab bewusst anpinnen."
+            })
+            .size(12),
+        );
         if let Some(error) = &editor.error {
             fields = fields.push(
                 text(error)
@@ -1980,6 +2051,7 @@ mod tests {
                     identity,
                     shell: TemplateShell::Bash,
                     directory: "/tmp".into(),
+                    pinned: false,
                 },
             )
             .unwrap();
@@ -2060,6 +2132,24 @@ mod tests {
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
         assert!(!app.templates_open);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
+        let _ = app.update(Message::SetPinned(first, true));
+        let _ = app.action(Action::CloseTab);
+        let _ = app.update(Message::Strip(tab_strip::Target::Close(first)));
+        assert!(app.confirming.is_none());
+        assert!(app.error.as_ref().unwrap().contains("angepinnt"));
+        let _ = app.action(Action::FocusTabs);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Delete), mods, None);
+        assert!(app.tabs.get(first).unwrap().pinned);
+        let _ = app.update(Message::Close(CloseTarget::PinnedTab(first)));
+        assert_eq!(app.confirming, Some(CloseTarget::PinnedTab(first)));
+        let _ = app.keyboard(
+            Key::Character("ignored".into()),
+            mods,
+            Some("ignored".into()),
+        );
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.tabs.get(first).unwrap().pinned);
+        let _ = app.update(Message::SetPinned(first, false));
         let _ = app.keyboard(Key::Character("q".into()), mods, Some("q".into()));
         wait(&mut app, |a| {
             a.tabs.get(first).unwrap().terminal.shell_title == "data-71"
@@ -2146,6 +2236,7 @@ mod tests {
                     },
                     shell: TemplateShell::Bash,
                     directory: "/tmp".into(),
+                    pinned: false,
                 },
             )
             .unwrap();
@@ -2301,5 +2392,49 @@ mod tests {
         let _ = app.request_close(CloseTarget::Window);
         assert!(app.editing.is_none());
         assert_eq!(app.confirming, Some(CloseTarget::Window));
+    }
+
+    #[test]
+    fn pinned_close_requires_explicit_target_and_window_cancel_keeps_every_session() {
+        let mut app = app();
+        let first = app.tabs.active.unwrap();
+        app.tabs
+            .configure(first, "Backend", Accent::Green, None)
+            .unwrap();
+        let _ = app.update(Message::Open(Shell::zsh()));
+        let second = app.tabs.active.unwrap();
+        app.tabs
+            .configure(second, "Deploy", Accent::Blue, None)
+            .unwrap();
+        let _ = app.update(Message::SetPinned(first, true));
+        let _ = app.update(Message::Close(CloseTarget::Tab(first)));
+        assert!(app.confirming.is_none());
+        assert_eq!(app.tabs.get(first).unwrap().state(), ProcessState::Running);
+        let _ = app.update(Message::Close(CloseTarget::PinnedTab(first)));
+        assert_eq!(app.confirming, Some(CloseTarget::PinnedTab(first)));
+        assert_eq!(
+            app.tabs.running_names(app.confirming.unwrap()),
+            ["Backend · 1"]
+        );
+        let _ = app.update(Message::CancelClose);
+        assert!(app.tabs.get(first).unwrap().pinned);
+        let _ = app.request_close(CloseTarget::Window);
+        assert_eq!(
+            app.tabs.running_names(app.confirming.unwrap()),
+            ["Backend · 1", "Deploy · 2"]
+        );
+        let _ = app.update(Message::CancelClose);
+        assert!(
+            app.tabs
+                .items
+                .iter()
+                .all(|tab| tab.state() == ProcessState::Running)
+        );
+        let _ = app.update(Message::Close(CloseTarget::PinnedTab(first)));
+        let _ = app.update(Message::ConfirmClose);
+        assert!(app.tabs.get(first).is_none());
+        assert_eq!(app.tabs.get(second).unwrap().state(), ProcessState::Running);
+        assert_eq!(app.tabs.active, Some(second));
+        assert!(!app.closing);
     }
 }

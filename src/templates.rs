@@ -58,6 +58,8 @@ pub struct Template {
     pub identity: Identity,
     pub shell: TemplateShell,
     pub directory: String,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Template {
@@ -176,6 +178,8 @@ impl Catalog {
             .checked_add(1)
             .ok_or("Keine weitere Vorlagen-ID verfügbar")?;
         draft.id = TemplateId(self.next_id);
+        // Saving a tab captures its actual pin state, never an editor default.
+        draft.pinned = source.pinned;
         draft.validate()?;
         if let Some(shortcut) = &draft.identity.shortcut {
             self.check_shortcut(tabs, None, Some(tab), shortcut)?;
@@ -210,6 +214,15 @@ impl Catalog {
             if tab.template == Some(draft.id) {
                 tab.identity = draft.identity.clone();
             }
+        }
+        let linked: Vec<_> = tabs
+            .items
+            .iter()
+            .filter(|tab| tab.template == Some(draft.id))
+            .map(|tab| tab.id)
+            .collect();
+        for id in linked {
+            tabs.set_pinned(id, draft.pinned)?;
         }
         *self = next_catalog;
         Ok(())
@@ -248,6 +261,29 @@ impl Catalog {
         }
     }
 
+    /// A linked change updates the existing template before moving the tab.
+    /// Validation/size failures leave both models unchanged.
+    pub fn set_pinned(
+        &mut self,
+        tabs: &mut Tabs,
+        tab: TabId,
+        pinned: bool,
+    ) -> Result<bool, String> {
+        let source = tabs.get(tab).ok_or("Dieser Tab ist nicht mehr geöffnet")?;
+        if let Some(id) = source.template {
+            let mut draft = self
+                .get(id)
+                .ok_or("Verknüpfte Vorlage nicht vorhanden")?
+                .clone();
+            draft.pinned = pinned;
+            self.edit(tabs, draft)?;
+            Ok(true)
+        } else {
+            tabs.set_pinned(tab, pinned)?;
+            Ok(false)
+        }
+    }
+
     pub fn open(&self, tabs: &mut Tabs, id: TemplateId, size: GridSize) -> Result<TabId, String> {
         let template = self.get(id).ok_or("Vorlage nicht mehr vorhanden")?;
         if let Some(tab) = tabs.items.iter().find(|t| t.template == Some(id)) {
@@ -262,6 +298,7 @@ impl Catalog {
         let source = tabs.get_mut(tab).unwrap();
         source.template = Some(id);
         source.identity = template.identity.clone();
+        tabs.set_pinned(tab, template.pinned)?;
         Ok(tab)
     }
 
