@@ -20,6 +20,9 @@ names use a Unicode-width-aware ellipsis. Hover shows the full name, stable
 session ID and full shortcut; the existing editor also retains the full name.
 Duplicate names remain valid, while close confirmations identify their session
 IDs. Existing fallback shell/ID labels and retained exit/start-error tabs remain.
+Blocking menus, the editor and close confirmations remove the tooltip overlay,
+including an already visible one. Navigation clears the old hover target so a
+moved or removed tab cannot leave stale inspection content behind.
 
 Overflow stays in one horizontal strip. Arrow targets and the mouse wheel move
 the tab viewport; the Plus target is outside it and remains reachable. Activation
