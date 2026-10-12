@@ -1,6 +1,7 @@
 //! Stable session identity, terminal state and bounded output processing.
 use crate::session::{ProcessState, Session};
 use crate::shortcuts::Shortcut;
+use crate::symbols::Symbol;
 use crate::templates::TemplateId;
 use crate::terminal::{GridSize, Terminal};
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,8 @@ pub struct Identity {
     pub name: Option<String>,
     pub accent: Accent,
     pub shortcut: Option<Shortcut>,
+    #[serde(default)]
+    pub symbol: Option<Symbol>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -369,10 +372,12 @@ impl Tabs {
         if let Some(shortcut) = &shortcut {
             self.check_shortcut(id, shortcut)?;
         }
+        let symbol = self.get(id).unwrap().identity.symbol;
         self.get_mut(id).unwrap().identity = Identity {
             name,
             accent,
             shortcut,
+            symbol,
         };
         Ok(())
     }

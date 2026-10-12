@@ -59,6 +59,7 @@ fn draft(name: &str, key: Named, directory: &str) -> Template {
             name: Some(name.into()),
             accent: Accent::Blue,
             shortcut: Some(binding(key)),
+            symbol: None,
         },
         shell: TemplateShell::Bash,
         directory: directory.into(),
@@ -89,14 +90,15 @@ fn linked_identity_changes_and_removal_never_touch_terminal_or_process() {
                 linked,
                 "Web",
                 Accent::Green,
-                Some(binding(Named::F9))
+                Some(binding(Named::F9)),
+                None,
             )
             .unwrap()
     );
     assert_eq!(catalog.get(id).unwrap().name(), "Web");
     assert!(
         !catalog
-            .configure_tab(&mut tabs, normal, "Temporary", Accent::Red, None)
+            .configure_tab(&mut tabs, normal, "Temporary", Accent::Red, None, None)
             .unwrap()
     );
     assert_eq!(catalog.items.len(), 1);
@@ -159,7 +161,8 @@ fn conflicts_with_closed_templates_live_tabs_and_app_actions_are_atomic() {
                 ordinary,
                 "Bad",
                 Accent::Red,
-                Some(binding(Named::F8))
+                Some(binding(Named::F8)),
+                None,
             )
             .is_err()
     );
@@ -177,6 +180,7 @@ fn conflicts_with_closed_templates_live_tabs_and_app_actions_are_atomic() {
             "Ordinary",
             Accent::Green,
             Some(binding(Named::F9)),
+            None,
         )
         .unwrap();
     let mut edit = catalog.get(id).unwrap().clone();
@@ -506,4 +510,152 @@ fn pin_state_survives_save_reopen_legacy_data_and_failed_persistence() {
         restarted.items.iter().map(|t| t.id).collect::<Vec<_>>(),
         [reopened, ordinary]
     );
+}
+
+#[test]
+fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storage_and_unlink() {
+    use hoori_term::symbols::Symbol;
+    let fixture = Fixture::new();
+    let file = fixture.file();
+    let mut tabs = Tabs::default();
+    let tab = model_tab(&mut tabs);
+    let mut catalog = Catalog::default();
+    catalog
+        .configure_tab(
+            &mut tabs,
+            tab,
+            "Symbols",
+            Accent::Green,
+            Some(binding(Named::F8)),
+            Some(Symbol::Code),
+        )
+        .unwrap();
+    assert!(catalog.items.is_empty()); // Symbol choice never saves an ordinary tab.
+    tabs.set_pinned(tab, true).unwrap();
+    tabs.get_mut(tab)
+        .unwrap()
+        .terminal
+        .feed(b"kept\x1b]2;user-symbol-is-not-output\x07");
+    let identity = tabs.get(tab).unwrap().identity.clone();
+    let mut saved_draft = draft("Symbols", Named::F8, "/tmp");
+    saved_draft.identity = identity.clone();
+    let id = catalog.save_tab(&mut tabs, tab, saved_draft).unwrap();
+    assert_eq!(catalog.get(id).unwrap().identity, identity);
+    let stamp = file.save(&catalog, None).unwrap().stamp;
+    for symbol in Symbol::ALL {
+        catalog
+            .configure_tab(
+                &mut tabs,
+                tab,
+                "Symbols",
+                Accent::Green,
+                Some(binding(Named::F8)),
+                Some(symbol),
+            )
+            .unwrap();
+        let loaded = Catalog::from_bytes(&catalog.to_bytes().unwrap()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().identity.symbol, Some(symbol));
+        assert_eq!(tabs.get(tab).unwrap().template, Some(id));
+        assert!(tabs.get(tab).unwrap().pinned);
+        assert_eq!(
+            tabs.get(tab).unwrap().terminal.shell_title,
+            "user-symbol-is-not-output"
+        );
+        assert_eq!(
+            tabs.shortcut_target(&Key::Named(Named::F8), Modifiers::empty()),
+            Some(tab)
+        );
+    }
+    let mut legacy: serde_json::Value = serde_json::from_slice(&stamp).unwrap();
+    legacy["items"][0]["identity"]
+        .as_object_mut()
+        .unwrap()
+        .remove("symbol");
+    assert!(
+        Catalog::from_bytes(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .identity
+            .symbol
+            .is_none()
+    );
+    for bad in [
+        serde_json::json!("unknown-icon"),
+        serde_json::json!(42),
+        serde_json::json!({"path": "/tmp/icon.svg"}),
+    ] {
+        legacy["items"][0]["identity"]["symbol"] = bad;
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&file.path, &bytes).unwrap();
+        assert!(file.load().is_err());
+        assert_eq!(fs::read(&file.path).unwrap(), bytes);
+    }
+    fs::write(&file.path, &stamp).unwrap();
+    let before = catalog.clone();
+    let tab_before = tabs.get(tab).unwrap().identity.clone();
+    assert!(
+        catalog
+            .configure_tab(&mut tabs, tab, "bad\nname", Accent::Red, None, None)
+            .is_err()
+    );
+    assert_eq!(catalog, before);
+    assert_eq!(tabs.get(tab).unwrap().identity, tab_before);
+    catalog
+        .configure_tab(
+            &mut tabs,
+            tab,
+            "Symbols",
+            Accent::Green,
+            Some(binding(Named::F8)),
+            None,
+        )
+        .unwrap();
+    assert!(tabs.get(tab).unwrap().identity.symbol.is_none());
+    let lock = file.path.with_extension("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(file.save(&catalog, Some(&stamp)).is_err());
+    assert_eq!(fs::read(&file.path).unwrap(), stamp);
+    fs::remove_dir(&lock).unwrap();
+    file.save(&catalog, Some(&stamp)).unwrap();
+    assert!(
+        file.load()
+            .unwrap()
+            .catalog
+            .get(id)
+            .unwrap()
+            .identity
+            .symbol
+            .is_none()
+    );
+    catalog
+        .configure_tab(
+            &mut tabs,
+            tab,
+            "Symbols",
+            Accent::Green,
+            Some(binding(Named::F8)),
+            Some(Symbol::Folder),
+        )
+        .unwrap();
+    tabs.remove(CloseTarget::PinnedTab(tab));
+    assert_eq!(catalog.items.len(), 1);
+    let ordinary = model_tab(&mut tabs);
+    let reopened = catalog.open(&mut tabs, id, GridSize::new(80, 12)).unwrap();
+    assert_ne!(reopened, tab);
+    assert_eq!(
+        catalog.open(&mut tabs, id, GridSize::new(80, 12)).unwrap(),
+        reopened
+    );
+    assert_eq!(tabs.items.len(), 2);
+    assert!(tabs.get(ordinary).unwrap().identity.symbol.is_none());
+    catalog.remove(&mut tabs, id).unwrap();
+    assert_eq!(
+        tabs.get(reopened).unwrap().identity.symbol,
+        Some(Symbol::Folder)
+    );
+    assert!(tabs.get(reopened).unwrap().pinned);
+    assert!(tabs.get(reopened).unwrap().identity.shortcut.is_none());
+    assert!(tabs.get(reopened).unwrap().template.is_none());
 }

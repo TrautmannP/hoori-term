@@ -3,6 +3,7 @@ pub mod input;
 pub mod notifications;
 pub mod session;
 pub mod shortcuts;
+pub mod symbols;
 pub mod tabs;
 pub mod templates;
 pub mod terminal;

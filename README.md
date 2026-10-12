@@ -7,6 +7,8 @@ colored and assigned their own direct shortcuts while their shells keep running.
 Explicit local templates preserve selected configurations for later, deliberate
 opening. They never resume processes or automatically open extra startup tabs.
 Pinned tabs form a front group and resist normal individual close actions.
+An optional built-in symbol adds another visual identity cue and is saved with
+explicit templates; no icon font or downloaded resource is required.
 
 ## Run
 
@@ -36,8 +38,9 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | Close active unpinned tab | Ctrl+Shift+W or its × button |
 | Pin / unpin the active tab | **Tab anpinnen** / **Tab entpinnen** |
 | Explicitly close a pinned tab | **Angepinnten Tab schließen** |
-| Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
+| Edit active tab name / accent / direct shortcut / symbol | Ctrl+Shift+E or **Tab bearbeiten** |
 | Save active tab as a template / edit its linked template | Ctrl+Shift+S or **Als Vorlage speichern** / **Vorlage bearbeiten** |
+| Choose a symbol while editing | F6 or **Auswählen**; arrows/Tab, Enter; Esc cancels the chooser |
 | List saved templates | Ctrl+Shift+P or **Vorlagen** |
 | Select / copy / paste | Drag left mouse / Ctrl+Shift+C / Ctrl+Shift+V |
 | Scroll history | Mouse wheel, Shift+PageUp / Shift+PageDown |
@@ -151,6 +154,8 @@ The [window-header validation](docs/hoo-32-window-header.md) covers native windo
 operations, focus, reserved geometry and the targeted X11 evidence procedure.
 The [pinning validation](docs/hoo-17-pinning.md) covers stable groups, protected
 close, the stored pin field and the bundled X11 restart/write-error exercise.
+The [symbol validation](docs/hoo-22-symbols.md) covers the original native catalog,
+keyboard/mouse selection, optional stable IDs and targeted GUI/storage evidence.
 
 ## Versioned review builds
 

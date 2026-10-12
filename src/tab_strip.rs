@@ -467,13 +467,35 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     &Path::circle(Point::new(rect.x + 15.0, 30.0), 3.5),
                     Color::from_rgb8(r, g, b),
                 );
+                if let Some(symbol) = tab.identity.symbol {
+                    crate::symbols_view::draw(
+                        frame,
+                        Some(symbol),
+                        Point::new(rect.x + 28.0, 12.0),
+                        16.0,
+                        TEXT,
+                    );
+                }
+                let name_offset = if tab.identity.symbol.is_some() {
+                    50.0
+                } else {
+                    28.0
+                };
                 tab_label(
                     frame,
-                    ellipsis(tab.label(), 18),
-                    Point::new(rect.x + 28.0, 12.0),
+                    ellipsis(
+                        tab.label(),
+                        if tab.identity.symbol.is_some() {
+                            16
+                        } else {
+                            18
+                        },
+                    ),
+                    Point::new(rect.x + name_offset, 12.0),
                     14.0,
                     TEXT,
                     layout.viewport,
+                    188.0 - name_offset,
                 );
                 let state = if tab.error.is_some() {
                     "Fehler"
@@ -511,6 +533,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         MUTED
                     },
                     layout.viewport,
+                    160.0,
                 );
                 let close = Layout::close(rect);
                 if hover == Some(Target::Close(tab.id)) {
@@ -669,11 +692,12 @@ fn tab_label(
     size: f32,
     color: Color,
     viewport: Rectangle,
+    lane_width: f32,
 ) {
     // Each lane is clipped independently; wide/combining Unicode cannot cover
     // the close target, neighbouring tab, or shortcut lane.
     if let Some(clip) =
-        viewport.intersection(&Rectangle::new(position, Size::new(160.0, size + 4.0)))
+        viewport.intersection(&Rectangle::new(position, Size::new(lane_width, size + 4.0)))
     {
         frame.with_clip(clip, |frame| label(frame, content, position, size, color));
     }
