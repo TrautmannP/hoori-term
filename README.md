@@ -2,8 +2,8 @@
 
 A local native Rust terminal prototype for Ubuntu using iced/wgpu,
 alacritty_terminal and portable-pty. Multiple independent zsh/Bash tabs,
-selection, clipboard and bounded scrollback are available. Custom tab names,
-colors and individual direct shortcuts are the next implementation slice.
+selection, clipboard and bounded scrollback are available. Tabs can be named,
+colored and assigned their own direct shortcuts while their shells keep running.
 
 ## Run
 
@@ -27,6 +27,7 @@ sessions and a tab to activate it. Inactive tabs keep processing output.
 | New Bash session | Ctrl+Shift+B |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Close active tab | Ctrl+Shift+W or its × button |
+| Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
 | Select / copy / paste | Drag left mouse / Ctrl+Shift+C / Ctrl+Shift+V |
 | Scroll history | Mouse wheel, Shift+PageUp / Shift+PageDown |
 | Oldest history / live output | Ctrl+Shift+Home / Ctrl+Shift+End or **↓ Live** |
@@ -39,6 +40,27 @@ Paste respects bracketed-paste mode, removes escape/control bytes except
 tab/newlines, and normalizes newlines to carriage returns outside that mode.
 Pastes over 65,524 UTF-8 bytes are rejected visibly before sending any data;
 queue saturation also rejects a whole entry rather than a partial bracket.
+
+**Tab bearbeiten** opens a draft with a name (up to 40 characters), eight
+accent choices and a shortcut recorder. Click **Aufnehmen**, press a combination,
+then **Übernehmen** to apply all changes together. Use Ctrl, Alt or Super with
+a character/navigation key, or F1–F12 with optional modifiers. Duplicate tab
+bindings and reserved app actions are rejected visibly. **Entfernen** clears a
+binding; an empty name restores the original shell/ID label. Escape stops a
+recording, then cancels the draft; Enter applies a draft outside recording.
+Name-field input stays in that field, and other app/terminal actions are paused
+while editing. Every session continues processing output.
+
+Names remain visible when a shell changes its title. Accents affect tab buttons,
+with a bright outline for the active tab; terminal colors stay controlled by
+the terminal program. Direct shortcuts target the same open tab ID after
+renaming, color changes or removal of preceding tabs. A closed tab's binding
+is removed and never inherited by a new tab. Shortcuts activate existing tabs,
+including their retained exit/error states. They are local to the focused
+window and current run. Names/colors/bindings are not saved across app restarts.
+Shortcut keys use the current layout's unmodified logical key and exact
+modifiers. Desktop-reserved chords may not be capturable; Ctrl+Alt may overlap
+AltGr on some layouts. Prefer free Ctrl+Shift combinations or function keys.
 
 Running sessions require confirmation naming the affected tabs; Escape or
 **Abbrechen** keeps them alive, Enter or **Beenden** confirms. Window close
@@ -74,7 +96,8 @@ git diff --check
 There is deliberately no GitHub CI pipeline. See [the spike evidence](docs/hoo-6-spike.md)
 for the GUI validation procedure, actual observations and integration limits.
 The [multi-session validation](docs/hoo-7-sessions.md) covers the follow-up
-tests and X11 GUI/clipboard exercise. Native Wayland and Windows runtime
+tests and X11 GUI/clipboard exercise. The [tab-identity validation](docs/hoo-8-identity.md)
+covers editing, conflicts and direct shortcut routing. Native Wayland and Windows runtime
 evidence remain separate gates.
 
 ## Versioned review builds

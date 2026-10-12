@@ -4,9 +4,10 @@ use hoori_term::build_info;
 use hoori_term::input;
 use hoori_term::notifications::Notifications;
 use hoori_term::session::ProcessState;
+use hoori_term::shortcuts::{self, Action, Shortcut};
 use hoori_term::terminal::GridSize;
 use iced::futures::StreamExt;
-use iced::widget::{button, canvas, column, container, row, space, text};
+use iced::widget::{button, canvas, column, container, operation, row, space, text, text_input};
 use iced::{Element, Event, Fill, Subscription, Task, Theme, keyboard, window};
 
 #[derive(Clone)]
@@ -67,7 +68,7 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone)]
 enum Message {
     Tick(hoori_term::tabs::TabId),
-    Event(Event),
+    Event(Event, iced::event::Status),
     Resize(hoori_term::tabs::TabId, GridSize),
     Open(hoori_term::tabs::Shell),
     Activate(hoori_term::tabs::TabId),
@@ -84,18 +85,35 @@ enum Message {
     Copy,
     Paste,
     Pasted(hoori_term::tabs::TabId, Option<String>),
+    Edit(TabId),
+    EditName(String),
+    EditAccent(Accent),
+    CaptureShortcut,
+    ClearShortcut,
+    ApplyEdit,
+    CancelEdit,
     CancelClose,
     ConfirmClose,
     ShutdownComplete,
 }
 
-use hoori_term::tabs::{CloseTarget, Shell, TabId, Tabs};
+use hoori_term::tabs::{Accent, CloseTarget, Shell, TabId, Tabs};
+
+struct TabEditor {
+    id: TabId,
+    name: String,
+    accent: Accent,
+    shortcut: Option<Shortcut>,
+    recording: bool,
+    error: Option<String>,
+}
 
 struct App {
     tabs: Tabs,
     default_shell: Shell,
     error: Option<String>,
     confirming: Option<CloseTarget>,
+    editing: Option<TabEditor>,
     closing: bool,
     pending_shutdowns: usize,
     cache: canvas::Cache,
@@ -114,6 +132,7 @@ impl App {
             default_shell,
             error: None,
             confirming: None,
+            editing: None,
             closing: false,
             pending_shutdowns: 0,
             cache: canvas::Cache::new(),
@@ -125,12 +144,14 @@ impl App {
             return build_info::title("Wird beendet …");
         };
         let title = if tab.terminal.shell_title.is_empty() {
-            tab.label.clone()
+            tab.description()
         } else {
-            format!("{} — {}", tab.label, tab.terminal.shell_title)
+            format!("{} — {}", tab.description(), tab.terminal.shell_title)
         };
         build_info::title(&if self.confirming.is_some() {
             format!("Schließen bestätigen — {title}")
+        } else if self.editing.is_some() {
+            format!("Tab bearbeiten — {title}")
         } else {
             title
         })
@@ -143,7 +164,11 @@ impl App {
             let id = source.0;
             source.1.stream().map(move |_| Message::Tick(id))
         }
-        let mut subscriptions = vec![iced::event::listen().map(Message::Event)];
+        // A text input captures Escape/Enter too. Observe their status so the
+        // editor can handle dialog keys without forwarding captured text to PTY.
+        let mut subscriptions = vec![iced::event::listen_with(|event, status, _| {
+            Some(Message::Event(event, status))
+        })];
         for tab in &self.tabs.items {
             if let Some(session) = &tab.session {
                 subscriptions.push(Subscription::run_with(
@@ -159,6 +184,7 @@ impl App {
         if self.closing {
             return Task::none();
         }
+        self.editing = None;
         if self.tabs.running_names(target).is_empty() {
             self.close(target)
         } else {
@@ -210,57 +236,44 @@ impl App {
         if self.closing {
             return Task::none();
         }
-        if (modifiers == keyboard::Modifiers::CTRL
-            || modifiers == keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT)
-            && key == Key::Named(Named::Tab)
-        {
-            self.tabs.cycle(!modifiers.shift());
-            self.cache.clear();
-            return Task::none();
-        }
-        if modifiers == keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT {
-            match key.as_ref() {
-                Key::Character(c) if c.eq_ignore_ascii_case("t") => {
-                    return self.update(Message::Open(self.default_shell.clone()));
-                }
-                Key::Character(c) if c.eq_ignore_ascii_case("b") => {
-                    return self.update(Message::Open(Shell::bash()));
-                }
-                Key::Character(c) if c.eq_ignore_ascii_case("w") => {
-                    if let Some(id) = self.tabs.active {
-                        return self.request_close(CloseTarget::Tab(id));
-                    }
-                }
-                Key::Character(c) if c.eq_ignore_ascii_case("c") => {
-                    return self.update(Message::Copy);
-                }
-                Key::Character(c) if c.eq_ignore_ascii_case("v") => {
-                    return self.update(Message::Paste);
-                }
-                Key::Named(Named::Home) => {
-                    if let Some(tab) = self.tabs.current_mut() {
-                        tab.terminal.scroll_to_top();
-                    }
-                    self.cache.clear();
-                    return Task::none();
-                }
-                Key::Named(Named::End) => return self.update(Message::Live),
-                _ => {}
-            }
-        }
-        if modifiers == keyboard::Modifiers::SHIFT
-            && matches!(key, Key::Named(Named::PageUp | Named::PageDown))
-        {
-            if let Some(tab) = self.tabs.current_mut() {
-                let lines = i32::from(tab.terminal.size.rows).saturating_sub(1).max(1);
-                tab.terminal.scroll(if key == Key::Named(Named::PageUp) {
-                    lines
+        if let Some(editor) = &mut self.editing {
+            if key == Key::Named(Named::Escape) && modifiers.is_empty() {
+                if editor.recording {
+                    editor.recording = false;
+                    editor.error = None;
                 } else {
-                    -lines
-                });
+                    return self.update(Message::CancelEdit);
+                }
+            } else if editor.recording {
+                match Shortcut::capture(&key, modifiers) {
+                    Ok(Some(shortcut)) => match self.tabs.check_shortcut(editor.id, &shortcut) {
+                        Ok(()) => {
+                            editor.shortcut = Some(shortcut);
+                            editor.recording = false;
+                            editor.error = None;
+                        }
+                        Err(error) => editor.error = Some(error),
+                    },
+                    Ok(None) => {}
+                    Err(error) => editor.error = Some(error),
+                }
+            } else if key == Key::Named(Named::Enter) {
+                return self.update(Message::ApplyEdit);
+            } else if key == Key::Named(Named::Tab) {
+                return if modifiers.shift() {
+                    operation::focus_previous()
+                } else {
+                    operation::focus_next()
+                };
             }
-            self.cache.clear();
+            // All other dialog text belongs to widgets, even when unhandled.
             return Task::none();
+        }
+        if let Some(action) = shortcuts::builtin(&key, modifiers) {
+            return self.action(action);
+        }
+        if let Some(id) = self.tabs.shortcut_target(&key, modifiers) {
+            return self.update(Message::Activate(id));
         }
         if let Some(tab) = self.tabs.current_mut()
             && let Some(bytes) =
@@ -274,6 +287,46 @@ impl App {
         Task::none()
     }
 
+    fn action(&mut self, action: Action) -> Task<Message> {
+        match action {
+            Action::NewTab => return self.update(Message::Open(self.default_shell.clone())),
+            Action::NewBash => return self.update(Message::Open(Shell::bash())),
+            Action::NextTab | Action::PreviousTab => {
+                self.tabs.cycle(action == Action::NextTab);
+            }
+            Action::CloseTab => {
+                if let Some(id) = self.tabs.active {
+                    return self.request_close(CloseTarget::Tab(id));
+                }
+            }
+            Action::EditTab => {
+                if let Some(id) = self.tabs.active {
+                    return self.update(Message::Edit(id));
+                }
+            }
+            Action::Copy => return self.update(Message::Copy),
+            Action::Paste => return self.update(Message::Paste),
+            Action::Live => return self.update(Message::Live),
+            Action::HistoryTop => {
+                if let Some(tab) = self.tabs.current_mut() {
+                    tab.terminal.scroll_to_top();
+                }
+            }
+            Action::PageUp | Action::PageDown => {
+                if let Some(tab) = self.tabs.current_mut() {
+                    let lines = i32::from(tab.terminal.size.rows).saturating_sub(1).max(1);
+                    tab.terminal.scroll(if action == Action::PageUp {
+                        lines
+                    } else {
+                        -lines
+                    });
+                }
+            }
+        }
+        self.cache.clear();
+        Task::none()
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         // Dialogs freeze commands and selection, but transport/status updates
         // continue for every tab. No queued paste can bypass a close dialog.
@@ -282,9 +335,26 @@ impl App {
                 message,
                 Message::Tick(_)
                     | Message::Resize(..)
-                    | Message::Event(_)
+                    | Message::Event(..)
                     | Message::CancelClose
                     | Message::ConfirmClose
+                    | Message::ShutdownComplete
+            )
+        {
+            return Task::none();
+        }
+        if self.editing.is_some()
+            && !matches!(
+                message,
+                Message::Tick(_)
+                    | Message::Resize(..)
+                    | Message::Event(..)
+                    | Message::EditName(_)
+                    | Message::EditAccent(_)
+                    | Message::CaptureShortcut
+                    | Message::ClearShortcut
+                    | Message::ApplyEdit
+                    | Message::CancelEdit
                     | Message::ShutdownComplete
             )
         {
@@ -321,15 +391,20 @@ impl App {
                 self.cache.clear();
             }
             Message::Close(target) => return self.request_close(target),
-            Message::Event(Event::Window(window::Event::CloseRequested)) => {
+            Message::Event(Event::Window(window::Event::CloseRequested), _) => {
                 return self.request_close(CloseTarget::Window);
             }
-            Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
-                key,
-                modifiers,
-                text,
-                ..
-            })) => return self.keyboard(key, modifiers, text.map(|t| t.to_string())),
+            Message::Event(
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    text,
+                    ..
+                }),
+                status,
+            ) if self.editing.is_some() || status == iced::event::Status::Ignored => {
+                return self.keyboard(key, modifiers, text.map(|t| t.to_string()));
+            }
             Message::Select {
                 id,
                 row,
@@ -394,6 +469,65 @@ impl App {
                     }
                 }
             }
+            Message::Edit(id) => {
+                if let Some(tab) = self.tabs.get(id) {
+                    self.editing = Some(TabEditor {
+                        id,
+                        name: tab.identity.name.clone().unwrap_or_default(),
+                        accent: tab.identity.accent,
+                        shortcut: tab.identity.shortcut.clone(),
+                        recording: false,
+                        error: None,
+                    });
+                    return operation::focus("tab-name");
+                }
+            }
+            Message::EditName(name) => {
+                if let Some(editor) = &mut self.editing
+                    && !editor.recording
+                {
+                    editor.name = name;
+                    editor.error = None;
+                }
+            }
+            Message::EditAccent(accent) => {
+                if let Some(editor) = &mut self.editing {
+                    editor.accent = accent;
+                    editor.error = None;
+                }
+            }
+            Message::CaptureShortcut => {
+                if let Some(editor) = &mut self.editing {
+                    editor.recording = !editor.recording;
+                    editor.error = None;
+                }
+            }
+            Message::ClearShortcut => {
+                if let Some(editor) = &mut self.editing {
+                    editor.shortcut = None;
+                    editor.recording = false;
+                    editor.error = None;
+                }
+            }
+            Message::ApplyEdit => {
+                if let Some(editor) = &self.editing
+                    && !editor.recording
+                {
+                    match self.tabs.configure(
+                        editor.id,
+                        &editor.name,
+                        editor.accent,
+                        editor.shortcut.clone(),
+                    ) {
+                        Ok(()) => {
+                            self.editing = None;
+                            self.cache.clear();
+                        }
+                        Err(error) => self.editing.as_mut().unwrap().error = Some(error),
+                    }
+                }
+            }
+            Message::CancelEdit => self.editing = None,
             Message::CancelClose => self.confirming = None,
             Message::ConfirmClose => {
                 if let Some(target) = self.confirming {
@@ -413,6 +547,7 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         use iced::widget::scrollable;
+        let interactive = self.confirming.is_none() && self.editing.is_none() && !self.closing;
         let mut tab_row = row![].spacing(5).align_y(iced::Center);
         for tab in &self.tabs.items {
             let marker = match tab.state() {
@@ -421,17 +556,24 @@ impl App {
                 ProcessState::Failed(_) => " · Fehler",
             };
             let active = self.tabs.active == Some(tab.id);
+            let accent = tab.identity.accent;
+            let shortcut = tab
+                .identity
+                .shortcut
+                .as_ref()
+                .map(|s| format!("  [{}]", s.label()))
+                .unwrap_or_default();
             tab_row = tab_row.push(
                 row![
-                    button(text(format!("{}{marker}", tab.label)).size(14))
-                        .on_press(Message::Activate(tab.id))
-                        .style(if active {
-                            button::primary
-                        } else {
-                            button::secondary
+                    button(text(format!("{}{marker}{shortcut}", tab.label())).size(14))
+                        .on_press_maybe(interactive.then_some(Message::Activate(tab.id)))
+                        .style(move |theme, status| {
+                            accent_style(theme, status, accent, active)
                         }),
                     button("×")
-                        .on_press(Message::Close(CloseTarget::Tab(tab.id)))
+                        .on_press_maybe(
+                            interactive.then_some(Message::Close(CloseTarget::Tab(tab.id)))
+                        )
                         .style(button::text)
                 ]
                 .spacing(1),
@@ -443,8 +585,8 @@ impl App {
                     scrollable::Scrollbar::new()
                 ))
                 .width(Fill),
-            button("+ zsh").on_press(Message::Open(Shell::zsh())),
-            button("+ Bash").on_press(Message::Open(Shell::bash()))
+            button("+ zsh").on_press_maybe(interactive.then_some(Message::Open(Shell::zsh()))),
+            button("+ Bash").on_press_maybe(interactive.then_some(Message::Open(Shell::bash())))
         ]
         .spacing(8)
         .align_y(iced::Center);
@@ -471,13 +613,16 @@ impl App {
                 .padding(10),
             );
         }
+        if let Some(editor) = &self.editing {
+            content = content.push(self.editor_view(editor));
+        }
         if let Some(tab) = self.tabs.current() {
             content = content.push(
                 canvas(view::TerminalView {
                     id: tab.id,
                     terminal: &tab.terminal,
                     cache: &self.cache,
-                    interactive: self.confirming.is_none() && !self.closing,
+                    interactive,
                 })
                 .width(Fill)
                 .height(Fill),
@@ -496,13 +641,20 @@ impl App {
                     row![
                         text(format!(
                             "{} · {status} · {} × {} · Verlauf {offset}",
-                            tab.label, tab.terminal.size.columns, tab.terminal.size.rows
+                            tab.description(),
+                            tab.terminal.size.columns,
+                            tab.terminal.size.rows
                         ))
-                        .size(12),
-                        space::horizontal(),
-                        button(text("Kopieren").size(12)).on_press(Message::Copy),
-                        button(text("Einfügen").size(12)).on_press(Message::Paste),
-                        button(text("↓ Live").size(12)).on_press(Message::Live),
+                        .size(12)
+                        .width(Fill),
+                        button(text("Tab bearbeiten").size(12))
+                            .on_press_maybe(interactive.then_some(Message::Edit(tab.id))),
+                        button(text("Kopieren").size(12))
+                            .on_press_maybe(interactive.then_some(Message::Copy)),
+                        button(text("Einfügen").size(12))
+                            .on_press_maybe(interactive.then_some(Message::Paste)),
+                        button(text("↓ Live").size(12))
+                            .on_press_maybe(interactive.then_some(Message::Live)),
                     ]
                     .spacing(8)
                     .align_y(iced::Center),
@@ -519,6 +671,125 @@ impl App {
         }
         container(content).width(Fill).height(Fill).into()
     }
+
+    fn editor_view<'a>(&'a self, editor: &'a TabEditor) -> Element<'a, Message> {
+        let mut colors = row![text("Farbe").size(14).width(70)]
+            .spacing(6)
+            .align_y(iced::Center);
+        for accent in Accent::ALL {
+            let selected = editor.accent == accent;
+            colors = colors.push(
+                button(text(accent.label()).size(13))
+                    .on_press(Message::EditAccent(accent))
+                    .style(move |theme, status| accent_style(theme, status, accent, selected)),
+            );
+        }
+        let shortcut = editor
+            .shortcut
+            .as_ref()
+            .map(Shortcut::label)
+            .unwrap_or_else(|| "Kein Shortcut".into());
+        let helper = if editor.recording {
+            "Jetzt Tastenkombination drücken. Esc beendet die Aufnahme."
+        } else {
+            "Strg, Alt oder Super + Taste; F1–F12 auch ohne. Gilt im fokussierten Fenster."
+        };
+        let name_input = text_input("Leer = ursprünglicher Sitzungsname", &editor.name)
+            .id("tab-name")
+            .on_input_maybe(
+                (!editor.recording).then_some(Message::EditName as fn(String) -> Message),
+            )
+            .size(16)
+            .padding(8);
+        let mut fields = column![
+            text(format!("Tab bearbeiten · Sitzung {}", editor.id.0)).size(18),
+            row![text("Name").size(14).width(70), name_input]
+                .spacing(6)
+                .align_y(iced::Center),
+            text(format!(
+                "Bis zu {} Zeichen. Änderungen gelten für diesen geöffneten Tab.",
+                hoori_term::tabs::MAX_NAME_CHARS
+            ))
+            .size(12),
+            colors,
+            row![
+                text("Shortcut").size(14).width(70),
+                text(shortcut).size(14).width(Fill),
+                button(if editor.recording {
+                    "Aufnahme abbrechen"
+                } else {
+                    "Aufnehmen"
+                })
+                .on_press(Message::CaptureShortcut),
+                button("Entfernen")
+                    .on_press(Message::ClearShortcut)
+                    .style(button::secondary),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+            text(helper).size(12),
+        ]
+        .spacing(10);
+        if let Some(error) = &editor.error {
+            fields = fields.push(
+                text(error)
+                    .size(14)
+                    .color(iced::Color::from_rgb8(255, 125, 145)),
+            );
+        }
+        fields = fields.push(
+            row![
+                space::horizontal(),
+                button("Abbrechen")
+                    .on_press(Message::CancelEdit)
+                    .style(button::secondary),
+                button("Übernehmen")
+                    .on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
+            ]
+            .spacing(8),
+        );
+        container(fields)
+            .padding(12)
+            .style(container::rounded_box)
+            .into()
+    }
+}
+
+fn accent_style(
+    theme: &Theme,
+    status: button::Status,
+    accent: Accent,
+    active: bool,
+) -> button::Style {
+    let [r, g, b] = accent.rgb();
+    let color = iced::Color::from_rgb8(r, g, b);
+    let strength = if status == button::Status::Hovered {
+        0.35
+    } else if active {
+        0.25
+    } else {
+        0.12
+    };
+    let mut style = button::secondary(theme, status);
+    style.background = Some(
+        iced::Color {
+            r: color.r * strength,
+            g: color.g * strength,
+            b: color.b * strength,
+            a: 1.0,
+        }
+        .into(),
+    );
+    style.border = iced::Border {
+        color: if active {
+            iced::Color::from_rgb8(235, 240, 255)
+        } else {
+            color
+        },
+        width: if active { 2.0 } else { 1.0 },
+        radius: 4.0.into(),
+    };
+    style
 }
 
 #[cfg(test)]
@@ -526,6 +797,25 @@ mod tests {
     use super::*;
     use alacritty_terminal::index::Side;
     use iced::keyboard::{Key, Modifiers};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn wait(app: &mut App, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for tab in &mut app.tabs.items {
+                tab.poll_output();
+            }
+            if done(app) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "synthetic PTY input did not arrive"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     fn app() -> App {
         App::new(Options {
@@ -662,5 +952,156 @@ mod tests {
         let _ = app.request_close(CloseTarget::Window);
         assert!(app.closing);
         assert!(app.confirming.is_none());
+    }
+
+    #[test]
+    fn direct_actions_and_editor_input_never_also_reach_the_pty() {
+        let script = "import os,tty; tty.setraw(0); os.write(1,b'\x1b]2;ready\x07'); data=bytearray()\nwhile True:\n data.extend(os.read(0,4096)); os.write(1,b'\x1b]2;data-'+data.hex().encode()+b'\x07')";
+        let mut app = App::new(Options {
+            shell: "/usr/bin/python3".into(),
+            args: vec!["-u".into(), "-c".into(), script.into()],
+        });
+        let first = app.tabs.active.unwrap();
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        let second = app.tabs.active.unwrap();
+        let mods = Modifiers::empty();
+        for (id, name, key) in [
+            (first, "Backend", keyboard::key::Named::F8),
+            (second, "Logs", keyboard::key::Named::F9),
+        ] {
+            app.tabs
+                .configure(
+                    id,
+                    name,
+                    Accent::Green,
+                    Shortcut::capture(&Key::Named(key), mods).unwrap(),
+                )
+                .unwrap();
+        }
+        wait(&mut app, |a| {
+            a.tabs
+                .items
+                .iter()
+                .all(|t| t.terminal.shell_title == "ready")
+        });
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
+        assert_eq!(app.tabs.active, Some(first));
+        let _ = app.keyboard(Key::Character("q".into()), mods, Some("q".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(first).unwrap().terminal.shell_title == "data-71"
+        });
+        assert_eq!(app.tabs.get(second).unwrap().terminal.shell_title, "ready");
+        assert!(app.title().contains("Backend"));
+        assert!(
+            app.title()
+                .starts_with(&format!("hoori-term [{}", &build_info::COMMIT[..7]))
+        );
+
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F9), mods, None);
+        let _ = app.keyboard(Key::Character("w".into()), mods, Some("w".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(second).unwrap().terminal.shell_title == "data-77"
+        });
+        let _ = app.update(Message::Edit(second));
+        let _ = app.update(Message::EditName("Draft".into()));
+        let _ = app.keyboard(Key::Character("r".into()), mods, Some("r".into()));
+        let _ = app.keyboard(
+            Key::Character("t".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            Some("T".into()),
+        );
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        let _ = app.update(Message::Pasted(second, Some("hidden paste".into())));
+        assert_eq!(app.tabs.items.len(), 2);
+        assert_eq!(app.tabs.active, Some(second));
+        let _ = app.update(Message::CaptureShortcut);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
+        assert!(
+            app.editing
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Backend")
+        );
+        assert!(app.editing.as_ref().unwrap().recording);
+        assert_eq!(app.tabs.get(second).unwrap().label(), "Logs");
+        let _ = app.keyboard(
+            Key::Character("t".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            None,
+        );
+        assert!(
+            app.editing
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("reserviert")
+        );
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(!app.editing.as_ref().unwrap().recording);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.editing.is_none());
+        assert_eq!(app.tabs.get(second).unwrap().label(), "Logs");
+        let _ = app.keyboard(Key::Character("z".into()), mods, Some("z".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(second).unwrap().terminal.shell_title == "data-777a"
+        });
+        assert_eq!(app.tabs.get(first).unwrap().terminal.shell_title, "data-71");
+        assert_eq!(app.tabs.items.len(), 2);
+    }
+
+    #[test]
+    fn editor_applies_atomically_and_close_confirmation_uses_custom_names() {
+        let mut app = app();
+        let id = app.tabs.active.unwrap();
+        let _ = app.update(Message::Edit(id));
+        let _ = app.update(Message::EditName("Backend".into()));
+        let _ = app.update(Message::EditAccent(Accent::Orange));
+        let _ = app.update(Message::CaptureShortcut);
+        let _ = app.keyboard(
+            Key::Character("1".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            None,
+        );
+        let _ = app.update(Message::ApplyEdit);
+        assert!(app.editing.is_none());
+        assert_eq!(app.tabs.current().unwrap().label(), "Backend");
+        assert_eq!(app.tabs.current().unwrap().identity.accent, Accent::Orange);
+        app.tabs
+            .current_mut()
+            .unwrap()
+            .terminal
+            .feed(b"\x1b]2;changed title\x07");
+        assert!(app.title().contains("Backend · 1 — changed title"));
+        assert_eq!(app.tabs.running_names(CloseTarget::Window), ["Backend · 1"]);
+        let _ = app.update(Message::Edit(id));
+        let _ = app.update(Message::CaptureShortcut);
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::Escape),
+            Modifiers::CTRL,
+            None,
+        );
+        let draft = app.editing.as_ref().unwrap();
+        assert!(!draft.recording);
+        assert!(
+            draft
+                .shortcut
+                .as_ref()
+                .unwrap()
+                .matches(&Key::Named(keyboard::key::Named::Escape), Modifiers::CTRL)
+        );
+        let _ = app.update(Message::EditName("x".repeat(100)));
+        let _ = app.update(Message::ClearShortcut);
+        let _ = app.update(Message::ApplyEdit);
+        assert!(app.editing.as_ref().unwrap().error.is_some());
+        assert!(app.tabs.current().unwrap().identity.shortcut.is_some());
+        assert_eq!(app.tabs.current().unwrap().label(), "Backend");
+        let _ = app.request_close(CloseTarget::Window);
+        assert!(app.editing.is_none());
+        assert_eq!(app.confirming, Some(CloseTarget::Window));
     }
 }
