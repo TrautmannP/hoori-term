@@ -470,7 +470,8 @@ finally:
             activate(w, 'F1', 13)
             assert track(w) == sorted(list(before) + [reopened]) and file.read_bytes() == old
             shot(w, '13-explicit-reopen-uses-saved-neighbor-with-new-id.png')
-            # Removing template 8 keeps its live compact tab 7 at its position.
+            # Removing template 8 keeps tab 7's normal view and Branch symbol
+            # at the same live position. Other tabs retain mixed compact views.
             activate(w, 'F7', 7)
             base['show_list'](w)
             w.key('Home')
@@ -482,7 +483,7 @@ finally:
             w.key('Escape')
             check(w, live, order)
             focus_id(w, live, 7)
-            shot(w, '14-template-removal-preserves-position-compact-symbol-and-pty.png')
+            shot(w, '14-template-removal-preserves-position-view-symbol-and-pty.png')
             w.key('Escape')
             proof, _ = reader(w, 'unlinked-shortcut')
             w.key('F7')
