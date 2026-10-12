@@ -13,6 +13,7 @@ fn shell(program: &str) -> Shell {
         } else {
             vec!["--noprofile".into(), "--norc".into(), "-i".into()]
         },
+        directory: None,
     }
 }
 

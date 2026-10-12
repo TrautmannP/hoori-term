@@ -49,6 +49,43 @@ pub struct Session {
 
 impl Session {
     pub fn spawn(program: &str, args: &[String], size: PtySize) -> Result<Self, String> {
+        Self::spawn_in(program, args, None, size)
+    }
+
+    pub fn spawn_in(
+        program: &str,
+        args: &[String],
+        directory: Option<&std::path::Path>,
+        size: PtySize,
+    ) -> Result<Self, String> {
+        // portable-pty 0.9 silently replaces a nonexistent cwd with HOME.
+        // On Ubuntu, hold a directory descriptor until spawn and pass its
+        // stable /proc alias. This prevents path removal/replacement from
+        // turning an explicit target into that fallback.
+        #[cfg(target_os = "linux")]
+        let directory_handle = directory
+            .map(|path| {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::fs::OpenOptionsExt;
+                let handle = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(nix::libc::O_PATH | nix::libc::O_DIRECTORY)
+                    .open(path)
+                    .map_err(|e| format!("Startverzeichnis nicht erreichbar: {e}"))?;
+                let alias =
+                    std::path::PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+                if !alias.is_dir() {
+                    return Err(
+                        "Startverzeichnis kann nicht sicher über /proc geöffnet werden".to_owned(),
+                    );
+                }
+                Ok((handle, alias))
+            })
+            .transpose()?;
+        #[cfg(not(target_os = "linux"))]
+        if directory.is_some_and(|path| !path.is_dir()) {
+            return Err("Startverzeichnis ist nicht erreichbar oder kein Verzeichnis".into());
+        }
         let pair = native_pty_system()
             .openpty(size)
             .map_err(|e| e.to_string())?;
@@ -68,12 +105,22 @@ impl Session {
         let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let mut command = CommandBuilder::new(program);
         command.args(args);
+        if let Some(directory) = directory {
+            #[cfg(target_os = "linux")]
+            let directory = directory_handle
+                .as_ref()
+                .map(|(_, alias)| alias.as_path())
+                .unwrap_or(directory);
+            command.cwd(directory);
+        }
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        drop(directory_handle);
         drop(pair.slave);
         let pid = child.process_id();
         let killer = child.clone_killer();

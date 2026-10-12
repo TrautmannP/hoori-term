@@ -491,6 +491,7 @@ mod tests {
         let shell = Shell {
             program: "/nonexistent/hoo19-layout-fixture".into(),
             args: vec![],
+            directory: None,
         };
         for _ in 0..12 {
             tabs.open(&shell, GridSize::new(80, 24)).unwrap();

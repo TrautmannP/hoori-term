@@ -9,6 +9,7 @@ fn open(tabs: &mut Tabs) -> TabId {
         &Shell {
             program: "/nonexistent/model-shell".into(),
             args: vec![],
+            directory: None,
         },
         GridSize::new(80, 12),
     )
