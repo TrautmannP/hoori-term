@@ -28,7 +28,9 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | --- | --- |
 | New session using the launch shell/arguments | Ctrl+Shift+T |
 | New Bash session | Ctrl+Shift+B |
-| Focus the tab strip | Ctrl+Shift+L |
+| Focus the tab strip / window controls | Ctrl+Shift+L |
+| Move / maximize or restore window | Drag / double-click the dotted build-hash area |
+| Resize window | Drag a window edge or corner |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Close active tab | Ctrl+Shift+W or its × button |
 | Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
@@ -63,8 +65,12 @@ the terminal program. Long names are shortened in the strip; hover or the editor
 shows the full name. Scroll arrows and the mouse wheel move overflowing tabs;
 the Plus target stays available. Direct navigation reveals its target.
 With strip focus, arrows/Home/End move focus, Tab/Shift+Tab traverse tab/close/Plus
-targets, Enter/Space selects, Delete requests the focused tab's close, and Escape
+and window-control targets, Enter/Space selects, Delete requests the focused tab's close, and Escape
 returns to terminal input. Focus movement alone preserves the active terminal.
+The system title bar is replaced by minimize, maximize/restore and close buttons
+in the same row. A reserved dotted area moves the window and keeps the build hash
+visible. The minimum window size is 640 × 360 logical pixels. Return from minimize
+through the desktop task switcher, taskbar or overview; sessions keep running.
 Direct shortcuts target the same open tab ID after
 renaming, color changes or removal of preceding tabs. Ordinary closed tabs lose
 their binding. A saved template keeps its opening/activation shortcut after its
@@ -132,6 +138,8 @@ The [connected tab-strip validation](docs/hoo-19-tab-strip.md) describes the
 HOO-19 layout, input routing and real comparison/regression procedure.
 The [template validation](docs/hoo-13-templates.md) covers HOO-13 configuration,
 stable links, asynchronous storage and the bundled X11 restart/error exercise.
+The [window-header validation](docs/hoo-32-window-header.md) covers native window
+operations, focus, reserved geometry and the targeted X11 evidence procedure.
 
 ## Versioned review builds
 

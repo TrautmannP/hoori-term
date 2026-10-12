@@ -1,5 +1,6 @@
 mod tab_strip;
 mod view;
+mod window_chrome;
 
 use hoori_term::build_info;
 use hoori_term::input;
@@ -12,7 +13,7 @@ use hoori_term::templates::{
 use hoori_term::terminal::GridSize;
 use iced::futures::StreamExt;
 use iced::widget::{
-    button, canvas, column, container, operation, row, scrollable, space, text, text_input,
+    button, canvas, column, container, operation, row, scrollable, space, stack, text, text_input,
 };
 use iced::{Element, Event, Fill, Subscription, Task, Theme, keyboard, window};
 
@@ -66,8 +67,13 @@ fn main() -> iced::Result {
         .title(App::title)
         .subscription(App::subscription)
         .theme(Theme::TokyoNight)
-        .window_size((1000.0, 700.0))
-        .exit_on_close_request(false)
+        .window(window::Settings {
+            size: iced::Size::new(1000.0, 700.0),
+            min_size: Some(iced::Size::new(640.0, 360.0)),
+            decorations: false,
+            exit_on_close_request: false,
+            ..Default::default()
+        })
         .run()
 }
 
@@ -75,6 +81,10 @@ fn main() -> iced::Result {
 enum Message {
     Tick(hoori_term::tabs::TabId),
     Event(Event, iced::event::Status),
+    WindowEvent(window::Id, window::Event),
+    WindowAction(window_chrome::Action),
+    ObserveWindow,
+    WindowObserved(u64, bool),
     Resize(hoori_term::tabs::TabId, GridSize),
     Open(hoori_term::tabs::Shell),
     Strip(tab_strip::Target),
@@ -171,6 +181,7 @@ struct App {
     closing: bool,
     pending_shutdowns: usize,
     strip: tab_strip::State,
+    chrome: window_chrome::State,
     launching: Option<usize>,
     catalog: Catalog,
     template_file: Option<TemplateFile>,
@@ -204,6 +215,7 @@ impl App {
             closing: false,
             pending_shutdowns: 0,
             strip: tab_strip::State::default(),
+            chrome: window_chrome::State::default(),
             launching: None,
             catalog: Catalog::default(),
             template_file: None,
@@ -381,9 +393,21 @@ impl App {
         }
         // A text input captures Escape/Enter too. Observe their status so the
         // editor can handle dialog keys without forwarding captured text to PTY.
-        let mut subscriptions = vec![iced::event::listen_with(|event, status, _| {
-            Some(Message::Event(event, status))
+        let mut subscriptions = vec![iced::event::listen_with(|event, status, id| {
+            Some(match event {
+                Event::Window(event) => Message::WindowEvent(id, event),
+                event => Message::Event(event, status),
+            })
         })];
+        // Resize/focus notifications update promptly. This low-frequency
+        // fallback also observes external maximization with unchanged geometry.
+        // Unfocused/minimized windows do not need a chrome repaint timer.
+        if self.chrome.id.is_some() && self.chrome.focused && !self.closing {
+            subscriptions.push(
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::ObserveWindow),
+            );
+        }
         for tab in &self.tabs.items {
             if let Some(session) = &tab.session {
                 subscriptions.push(Subscription::run_with(
@@ -393,6 +417,74 @@ impl App {
             }
         }
         Subscription::batch(subscriptions)
+    }
+
+    fn observe_window(&mut self) -> Task<Message> {
+        self.chrome
+            .query()
+            .map(|(id, revision)| {
+                window::is_maximized(id)
+                    .map(move |maximized| Message::WindowObserved(revision, maximized))
+            })
+            .unwrap_or_else(Task::none)
+    }
+
+    fn window_event(&mut self, id: window::Id, event: window::Event) -> Task<Message> {
+        if self.chrome.id.is_some_and(|current| current != id) {
+            return Task::none();
+        }
+        self.chrome.id = Some(id);
+        match event {
+            window::Event::CloseRequested => self.request_close(CloseTarget::Window),
+            window::Event::Opened { .. } | window::Event::Focused => {
+                self.chrome.focused = true;
+                self.observe_window()
+            }
+            window::Event::Resized(_) | window::Event::Rescaled(_) => self.observe_window(),
+            window::Event::Unfocused => {
+                self.chrome.focused = false;
+                self.strip.focused = None;
+                self.strip.hovered = None;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn window_action(&mut self, action: window_chrome::Action) -> Task<Message> {
+        use window_chrome::{Action as WindowAction, Control};
+        if self.closing {
+            return Task::none();
+        }
+        self.strip.focused = None;
+        self.strip.hovered = None;
+        if let WindowAction::Control(Control::Close) = action {
+            return self.request_close(CloseTarget::Window);
+        }
+        let Some(id) = self.chrome.id else {
+            return Task::none();
+        };
+        match action {
+            WindowAction::Control(Control::Minimize) => window::minimize(id, true),
+            WindowAction::Control(Control::Maximize) => {
+                // iced reads the native state when dispatching this request;
+                // the UI changes only after a subsequent native observation.
+                Task::batch([
+                    window::toggle_maximize(id),
+                    Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        },
+                        |_| Message::ObserveWindow,
+                    ),
+                ])
+            }
+            WindowAction::Drag => window::drag(id),
+            WindowAction::Resize(edge) if !self.chrome.maximized => {
+                window::drag_resize(id, edge.direction())
+            }
+            _ => Task::none(),
+        }
     }
 
     fn request_close(&mut self, target: CloseTarget) -> Task<Message> {
@@ -715,6 +807,18 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Native window handling remains available on modal surfaces, just
+        // like the OS close action. It never enters terminal key encoding.
+        match message {
+            Message::WindowEvent(id, event) => return self.window_event(id, event),
+            Message::WindowAction(action) => return self.window_action(action),
+            Message::ObserveWindow => return self.observe_window(),
+            Message::WindowObserved(revision, maximized) => {
+                self.chrome.observed(revision, maximized);
+                return Task::none();
+            }
+            _ => {}
+        }
         let storage_message = matches!(
             &message,
             Message::Loaded(_)
@@ -840,6 +944,10 @@ impl App {
                         self.launching = Some(0);
                         self.strip.focused = None;
                     }
+                    Target::Window(control) => {
+                        return self.window_action(window_chrome::Action::Control(control));
+                    }
+                    Target::Drag => {}
                 }
             }
             Message::StripWidth(width) => {
@@ -1181,6 +1289,8 @@ impl App {
             tabs: &self.tabs,
             state: &self.strip,
             interactive,
+            window_interactive: !self.closing,
+            maximized: self.chrome.maximized,
         })
         .width(Fill)
         .height(tab_strip::HEIGHT);
@@ -1191,7 +1301,9 @@ impl App {
             }).unwrap_or_default(),
             Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
-            None => "Tableiste: Strg+Umschalt+L · Pfeile/Tab navigieren · Enter auswählen · Esc zurück zum Terminal".into(),
+            Some(tab_strip::Target::Window(control)) => format!("{} · Strg+Umschalt+L, Umschalt+Tab: Fensterknöpfe", control.label(self.chrome.maximized)),
+            Some(tab_strip::Target::Drag) => format!("{}\nZiehen: Fenster bewegen · Doppelklick: maximieren/wiederherstellen", build_info::metadata()),
+            None => "Tableiste/Fensterknöpfe: Strg+Umschalt+L · Tab/Umschalt+Tab navigieren · Enter auswählen · Esc zurück zum Terminal".into(),
         };
         // Removing the tooltip widget also removes an already visible overlay.
         // A longer delay only affects a future hover and leaves it on dialogs.
@@ -1397,7 +1509,18 @@ impl App {
                 .height(Fill),
             );
         }
-        container(content).width(Fill).height(Fill).into()
+        stack([
+            container(content).width(Fill).height(Fill).into(),
+            canvas(window_chrome::ResizeBorder {
+                enabled: !self.closing && !self.chrome.maximized,
+            })
+            .width(Fill)
+            .height(Fill)
+            .into(),
+        ])
+        .width(Fill)
+        .height(Fill)
+        .into()
     }
 
     fn templates_view(&self) -> Element<'_, Message> {
@@ -1629,9 +1752,24 @@ mod tests {
         let mut app = app();
         let original = app.tabs.active.unwrap();
         let _ = app.update(Message::Open(Shell::bash()));
-        let _ = app.request_close(CloseTarget::Window);
+        let _ = app.update(Message::Edit(original));
+        let _ = app.update(Message::WindowAction(window_chrome::Action::Control(
+            window_chrome::Control::Close,
+        )));
+        assert!(app.editing.is_none());
         assert_eq!(app.confirming, Some(CloseTarget::Window));
         assert_eq!(app.tabs.running_names(CloseTarget::Window).len(), 2);
+        // Native and own close requests share the same confirmation, including
+        // repetitions while it is already visible. Neither confirms it.
+        let _ = app.update(Message::WindowEvent(
+            window::Id::unique(),
+            window::Event::CloseRequested,
+        ));
+        let _ = app.update(Message::WindowAction(window_chrome::Action::Control(
+            window_chrome::Control::Close,
+        )));
+        assert_eq!(app.confirming, Some(CloseTarget::Window));
+        assert_eq!(app.pending_shutdowns, 0);
         let _ = app.update(Message::Activate(original));
         let _ = app.update(Message::Open(Shell::bash()));
         let _ = app.keyboard(
@@ -1847,6 +1985,44 @@ mod tests {
             .unwrap();
         let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
         assert_eq!(app.tabs.active, Some(first));
+        // The same header focus path reaches the window controls in reverse
+        // order. Native requests are tasks; these model tests check routing,
+        // while the real desktop run verifies the native effects.
+        for steps in [2, 3] {
+            let _ = app.action(Action::FocusTabs);
+            for _ in 0..steps {
+                let _ = app.keyboard(
+                    Key::Named(keyboard::key::Named::Tab),
+                    Modifiers::SHIFT,
+                    None,
+                );
+            }
+            assert_eq!(
+                app.strip.focused,
+                Some(tab_strip::Target::Window(if steps == 2 {
+                    window_chrome::Control::Maximize
+                } else {
+                    window_chrome::Control::Minimize
+                }))
+            );
+            let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+            assert!(app.strip.focused.is_none());
+        }
+        let _ = app.update(Message::WindowAction(window_chrome::Action::Drag));
+        let _ = app.update(Message::WindowAction(window_chrome::Action::Resize(
+            window_chrome::Edge::East,
+        )));
+        let _ = app.action(Action::FocusTabs);
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::Tab),
+            Modifiers::SHIFT,
+            None,
+        );
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert_eq!(app.confirming, Some(CloseTarget::Window));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.confirming.is_none());
+        assert_eq!(app.tabs.items.len(), 2);
         // Real raw-mode readers make extra bytes observable. Focus movement
         // and both menu cancellation paths must not activate/start/send data.
         let _ = app.action(Action::FocusTabs);
