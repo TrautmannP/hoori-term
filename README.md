@@ -99,6 +99,8 @@ The [multi-session validation](docs/hoo-7-sessions.md) covers the follow-up
 tests and X11 GUI/clipboard exercise. The [tab-identity validation](docs/hoo-8-identity.md)
 covers editing, conflicts and direct shortcut routing. Native Wayland and Windows runtime
 evidence remain separate gates.
+The [refresh comparison](docs/hoo-15-refresh-comparison.md) records the bounded
+HOO-15 `top`/GNOME investigation, raw evidence, timing limits and follow-up proposal.
 
 ## Versioned review builds
 
