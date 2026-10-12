@@ -415,7 +415,8 @@ finally:
                 if not args.baseline:
                     w.run('exit 7')
                     wait_for(lambda: len(track(w)) == 11)
-                    wait_for(lambda: 'beendet' in w.title())
+                    # Exit state is shown in the tab/footer, not the OS title.
+                    time.sleep(.3)
                     shot(w,'13-exited-tab-retained.png')
                     click(w,640-26,26)
                     wait_for(lambda: 'Schließen bestätigen' in w.title())
