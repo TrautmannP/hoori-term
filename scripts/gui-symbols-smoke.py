@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--catalog-from', type=Path)
     parser.add_argument('--resume-live-after-resize', action='store_true',
                         help='Continue the live phase from a preserved code/database two-template catalog')
+    parser.add_argument('--resume-live-storage', action='store_true',
+                        help='Continue after a completed copy/routing phase using a code/database catalog')
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11', 'This exercise proves X11 only'
     binary, output = args.binary.resolve(), args.output.resolve()
@@ -45,7 +47,7 @@ def main():
     literal, bash_dir = output / 'space ; literal $(text)', output / 'bash-home'
     literal.mkdir()
     bash_dir.mkdir()
-    if args.resume_live_after_resize:
+    if args.resume_live_after_resize or args.resume_live_storage:
         assert args.catalog_from and args.only in ['all', 'live']
     if args.catalog_from:
         catalog = read_json(args.catalog_from.resolve())
@@ -59,6 +61,7 @@ def main():
     report = {'commit': commit, 'metadata': metadata, 'scope': args.only,
               'catalog_from': str(args.catalog_from) if args.catalog_from else None,
               'resume_live_after_resize': args.resume_live_after_resize,
+              'resume_live_storage': args.resume_live_storage,
               'os': Path('/etc/os-release').read_text(), 'display': os.environ.get('DISPLAY'),
               'session_type': os.environ.get('XDG_SESSION_TYPE'),
               'zsh': command('zsh', '--version'), 'bash': command('bash', '--version').splitlines()[0],
@@ -182,7 +185,7 @@ finally:
 
     try:
         if args.only in ['all', 'live']:
-            if args.resume_live_after_resize:
+            if args.resume_live_after_resize or args.resume_live_storage:
                 state = snapshot('01-continuation-source.json')
                 assert [t['identity']['symbol'] for t in state['items']] == ['code', 'database']
                 ids = [t['id'] for t in state['items']]
@@ -201,34 +204,35 @@ finally:
                 pids = track(w)
                 assert len(pids) == 3
                 report['original_shell_pids'] = {'Backend': backend, 'Admin': admin, 'Scratch': scratch}
-                activate(w, 'F3', 'Scratch')
-                proof, sizes = reader(w, 'symbol-routing')
-                # Repeat only routing/resize prerequisites for the unfinished copy phase.
-                choose(w, 'shield')
-                choose(w, None)
-                choose(w, 'branch')
-                chooser(w)
-                w.key('Home')
-                w.key('Escape')
-                w.key('Escape')
-                w.key('ctrl+shift+w')
-                assert 'Schließen bestätigen' not in w.title()
-                click(w, 235, 635)
-                wait_for(lambda: 'Schließen bestätigen' in w.title())
-                w.key('Escape')
-                wait_for(lambda: 'Schließen bestätigen' not in w.title())
-                initial_size = read_json(sizes)
-                sized(w, 640, 600)
-                wait_for(lambda: read_json(sizes) != initial_size)
-                narrow_size = read_json(sizes)
-                chooser(w)
-                w.key('End')
-                w.key('Escape')
-                w.key('Escape')
-                sized(w, 1280)
-                wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
-                assert read_json(file) == state and track(w) == pids
-                report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
+                if not args.resume_live_storage:
+                    activate(w, 'F3', 'Scratch')
+                    proof, sizes = reader(w, 'symbol-routing')
+                    # Repeat only routing/resize prerequisites for the unfinished copy phase.
+                    choose(w, 'shield')
+                    choose(w, None)
+                    choose(w, 'branch')
+                    chooser(w)
+                    w.key('Home')
+                    w.key('Escape')
+                    w.key('Escape')
+                    w.key('ctrl+shift+w')
+                    assert 'Schließen bestätigen' not in w.title()
+                    click(w, 235, 635)
+                    wait_for(lambda: 'Schließen bestätigen' in w.title())
+                    w.key('Escape')
+                    wait_for(lambda: 'Schließen bestätigen' not in w.title())
+                    initial_size = read_json(sizes)
+                    sized(w, 640, 600)
+                    wait_for(lambda: read_json(sizes) != initial_size)
+                    narrow_size = read_json(sizes)
+                    chooser(w)
+                    w.key('End')
+                    w.key('Escape')
+                    w.key('Escape')
+                    sized(w, 1280)
+                    wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
+                    assert read_json(file) == state and track(w) == pids
+                    report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
             else:
                 w = make_window('01-live')
                 backend = track(w)[0]
@@ -320,41 +324,46 @@ finally:
                 sized(w, 1280)
                 wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
                 report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
-            # Redraw the fixture after reflow instead of assuming old content
-            # stays on row one while dialogs change the terminal viewport.
-            raw_pid = read_json(sizes)['pid']
-            assert start_time(raw_pid) == owned[raw_pid]
-            os.kill(raw_pid, signal.SIGWINCH)
-            time.sleep(.2)
-            clipboard(b'HOO22_COPY_SENTINEL')
-            w.focus()
-            command('xdotool', 'mousemove', '--window', w.id, '12', '72')
-            command('xdotool', 'mousedown', '1')
-            time.sleep(.1)
-            command('xdotool', 'mousemove', '--window', w.id, '158', '72')
-            time.sleep(.15)
-            command('xdotool', 'mouseup', '1')
-            w.key('ctrl+shift+c')
-            wait_for(lambda: command('xclip', '-selection', 'clipboard', '-out') == 'HOO22_SELECTION')
-            shot(w, '06-selection-and-resized-symbol-tab.png')
-            clipboard(b'PASTE_ONLY\nsecond')
-            w.key('ctrl+shift+v')
-            w.type('ok!')
-            wait_for(proof.exists)
-            assert proof.read_bytes() == b'\x1b[200~PASTE_ONLY\nsecond\x1b[201~ok!', proof.read_bytes()
-            wait_for(lambda: 'raw-done' in w.title())
-            for key, name, marker in [('F1', 'Backend', 'BACKEND'), ('F2', 'Admin', 'ADMIN'), ('F3', 'Scratch', 'SCRATCH')]:
-                activate(w, key, name)
-                w.run("printf '\\033]2;HOO-22 state-%s\\007' \"$HOO22_STATE\"")
-                wait_for(lambda: 'state-' + marker in w.title())
-                assert track(w) == pids
-            report['choice_cancel_remove_preserves_identity_pin_processes_state_and_exact_pty_routing'] = True
+            if not args.resume_live_storage:
+                # Redraw the fixture after reflow instead of assuming old content
+                # stays on row one while dialogs change the terminal viewport.
+                raw_pid = read_json(sizes)['pid']
+                assert start_time(raw_pid) == owned[raw_pid]
+                os.kill(raw_pid, signal.SIGWINCH)
+                time.sleep(.2)
+                clipboard(b'HOO22_COPY_SENTINEL')
+                w.focus()
+                command('xdotool', 'mousemove', '--window', w.id, '12', '72')
+                command('xdotool', 'mousedown', '1')
+                time.sleep(.1)
+                command('xdotool', 'mousemove', '--window', w.id, '158', '72')
+                time.sleep(.15)
+                command('xdotool', 'mouseup', '1')
+                w.key('ctrl+shift+c')
+                wait_for(lambda: command('xclip', '-selection', 'clipboard', '-out') == 'HOO22_SELECTION')
+                shot(w, '06-selection-and-resized-symbol-tab.png')
+                clipboard(b'PASTE_ONLY\nsecond')
+                w.key('ctrl+shift+v')
+                w.type('ok!')
+                wait_for(proof.exists)
+                assert proof.read_bytes() == b'\x1b[200~PASTE_ONLY\nsecond\x1b[201~ok!', proof.read_bytes()
+                wait_for(lambda: 'raw-done' in w.title())
+                for key, name, marker in [('F1', 'Backend', 'BACKEND'), ('F2', 'Admin', 'ADMIN'), ('F3', 'Scratch', 'SCRATCH')]:
+                    activate(w, key, name)
+                    w.run("printf '\\033]2;HOO-22 state-%s\\007' \"$HOO22_STATE\"")
+                    wait_for(lambda: 'state-' + marker in w.title())
+                    assert track(w) == pids
+                report['choice_cancel_remove_preserves_identity_pin_processes_state_and_exact_pty_routing'] = True
+            else:
+                report['storage_continuation_only'] = True
             sized(w, 1000)
             activate(w, 'F2', 'Admin')
             before = file.read_bytes()
             lock = file.with_suffix('.lock')
-            assert lock.is_file()
-            lock.unlink()
+            if lock.is_file():
+                lock.unlink()
+            else:
+                assert not lock.exists()
             lock.mkdir()
             choose(w, 'star')
             time.sleep(.4)

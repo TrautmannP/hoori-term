@@ -105,7 +105,8 @@ drawing or a visible error. Preserve failed attempts and their actual source
 identity. `--only live|restart|layouts|errors` and an appropriate two-template
 `--catalog-from` snapshot support targeted continuation without repeating
 unchanged phases. `--resume-live-after-resize --catalog-from /preserved/catalog`
-continues the live copy/routing/storage remainder from a code/database fixture.
+continues the live copy/routing/storage remainder from a code/database fixture;
+`--resume-live-storage` skips an already completed copy/routing phase.
 The raw copy fixture explicitly redraws after resize; terminal reflow may move
 old content away from its original screen row. No measured result is implied
 by the harness's existence.
