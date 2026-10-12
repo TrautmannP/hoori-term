@@ -30,6 +30,8 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--only', choices=['all', 'live', 'restart', 'layouts', 'errors'], default='all')
     parser.add_argument('--catalog-from', type=Path)
+    parser.add_argument('--resume-live-after-resize', action='store_true',
+                        help='Continue the live phase from a preserved code/database two-template catalog')
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11', 'This exercise proves X11 only'
     binary, output = args.binary.resolve(), args.output.resolve()
@@ -43,6 +45,8 @@ def main():
     literal, bash_dir = output / 'space ; literal $(text)', output / 'bash-home'
     literal.mkdir()
     bash_dir.mkdir()
+    if args.resume_live_after_resize:
+        assert args.catalog_from and args.only in ['all', 'live']
     if args.catalog_from:
         catalog = read_json(args.catalog_from.resolve())
         assert catalog and len(catalog['items']) == 2
@@ -54,6 +58,7 @@ def main():
     commit = re.search(r'commit: ([0-9a-f]{40})', metadata).group(1)
     report = {'commit': commit, 'metadata': metadata, 'scope': args.only,
               'catalog_from': str(args.catalog_from) if args.catalog_from else None,
+              'resume_live_after_resize': args.resume_live_after_resize,
               'os': Path('/etc/os-release').read_text(), 'display': os.environ.get('DISPLAY'),
               'session_type': os.environ.get('XDG_SESSION_TYPE'),
               'zsh': command('zsh', '--version'), 'bash': command('bash', '--version').splitlines()[0],
@@ -154,10 +159,10 @@ old=termios.tcgetattr(0)
 def size(*_):
  s=os.get_terminal_size(0)
  Path(sys.argv[2]).write_text(json.dumps({'pid':os.getpid(),'columns':s.columns,'lines':s.lines}))
+ os.write(1,b'\x1b[2J\x1b[HHOO22_SELECTION\r\n\x1b[?2004h\x1b]2;HOO-22 raw-ready\x07')
 signal.signal(signal.SIGWINCH,size)
 tty.setraw(0)
 size()
-os.write(1,b'\x1b[2J\x1b[HHOO22_SELECTION\r\n\x1b[?2004h\x1b]2;HOO-22 raw-ready\x07')
 data=bytearray()
 try:
  while not data.endswith(b'!'): data.extend(os.read(0,4096))
@@ -177,96 +182,150 @@ finally:
 
     try:
         if args.only in ['all', 'live']:
-            w = make_window('01-live')
-            backend = track(w)[0]
-            clean(w, 'BACKEND')
-            configure(w, 'Backend', 311, 'F1')
-            chooser(w)
-            shot(w, '01-local-catalog-names-and-focus.png')
-            w.key('End')
-            w.key('Escape')  # Chooser cancel leaves the editor draft untouched.
-            w.key('Return')
-            assert not file.exists() and track(w) == [backend]
-            chooser(w)
-            click(w, 825, 160)  # Code, then cancel the entire draft.
-            w.key('Escape')
-            wait_for(lambda: 'Tab bearbeiten' not in w.title())
-            assert not file.exists() and track(w) == [backend]
-            choose(w, 'code')
-            base['save_current'](w, literal)
-            wait_for(lambda: read_json(file) and len(read_json(file)['items']) == 1)
-            assert read_json(file)['items'][0]['identity']['symbol'] == 'code'
-            assert track(w) == [backend]
-            w.key('ctrl+shift+b')
-            wait_for(lambda: 'bash · 2' in w.title())
-            admin = list(set(track(w)) - {backend})[0]
-            clean(w, 'ADMIN', bash=True)
-            configure(w, 'Admin', 430, 'F2')
-            choose(w, 'server', mouse=True)
-            base['save_current'](w, bash_dir, bash=True)
-            wait_for(lambda: len(read_json(file)['items']) == 2)
-            assert read_json(file)['items'][1]['identity']['symbol'] == 'server'
-            click(w, 65, 635)  # Actual pin state remains independent of icons.
-            wait_for(lambda: read_json(file)['items'][1]['pinned'] is True)
-            w.key('ctrl+shift+t')
-            wait_for(lambda: 'zsh · 3' in w.title())
-            scratch = list(set(track(w)) - {backend, admin})[0]
-            clean(w, 'SCRATCH')
-            configure(w, 'Scratch', 256, 'F3')
-            choose(w, 'folder')
-            pids = track(w)
-            state = snapshot('01-three-tabs-two-templates.json')
-            ids = [t['id'] for t in state['items']]
-            assert len(pids) == 3 and len(state['items']) == 2
-            report['original_shell_pids'] = {'Backend': backend, 'Admin': admin, 'Scratch': scratch}
-            shot(w, '02-three-symbols-linked-ordinary-and-pin.png')
-            activate(w, 'F2', 'Admin')
-            ticker = output / 'ticker.py'
-            ticker_pid = output / 'ticker-pid.json'
-            ticker.write_text("import json,os,sys,time\nfrom pathlib import Path\nPath(sys.argv[1]).write_text(json.dumps({'pid':os.getpid()}))\nfor i in range(40):\n print('HOO22 inactive',i,flush=True); time.sleep(.025)\n")
-            w.run('python3 ' + shlex.quote(str(ticker)) + ' ' + shlex.quote(str(ticker_pid)) + "; printf '\\033]2;HOO-22 inactive-done\\007'")
-            wait_for(lambda: read_json(ticker_pid))
-            owned[read_json(ticker_pid)['pid']] = start_time(read_json(ticker_pid)['pid'])
-            activate(w, 'F3', 'Scratch')
-            proof, sizes = reader(w, 'symbol-routing')
-            choose(w, 'shield')
-            assert track(w) == pids and read_json(file) == state
-            choose(w, None)
-            shot(w, '03-symbol-removed-without-changing-identity.png')
-            choose(w, 'branch')
-            chooser(w)
-            w.key('Home')
-            w.key('Escape')
-            w.key('Escape')
-            assert read_json(file) == state and track(w) == pids
-            click(w, 65, 635)  # Temporary pinned tab must still not become a template.
-            w.key('ctrl+shift+w')
-            assert 'Schließen bestätigen' not in w.title() and track(w) == pids
-            click(w, 235, 635)
-            wait_for(lambda: 'Schließen bestätigen' in w.title())
-            shot(w, '04-symbol-does-not-override-pin-or-close-target.png')
-            w.key('Escape')
-            wait_for(lambda: 'Schließen bestätigen' not in w.title())
-            assert track(w) == pids
-            activate(w, 'F2', 'Admin')
-            wait_for(lambda: 'inactive-done' in w.title())
-            choose(w, 'database')
-            wait_for(lambda: read_json(file)['items'][1]['identity']['symbol'] == 'database')
-            assert read_json(file)['items'][1]['pinned'] is True
-            assert [t['id'] for t in read_json(file)['items']] == ids
-            shot(w, '05-inactive-output-and-linked-symbol-change.png')
-            activate(w, 'F3', 'Scratch')
-            initial_size = read_json(sizes)
-            sized(w, 640, 600)
-            wait_for(lambda: read_json(sizes) != initial_size)
-            narrow_size = read_json(sizes)
-            chooser(w)
-            w.key('End')
-            w.key('Escape')
-            w.key('Escape')
-            sized(w, 1280)
-            wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
-            report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
+            if args.resume_live_after_resize:
+                state = snapshot('01-continuation-source.json')
+                assert [t['identity']['symbol'] for t in state['items']] == ['code', 'database']
+                ids = [t['id'] for t in state['items']]
+                w = make_window('01-live-continuation')
+                scratch = track(w)[0]
+                clean(w, 'SCRATCH')
+                configure(w, 'Scratch', 256, 'F3')
+                choose(w, 'branch')
+                click(w, 65, 635)
+                activate(w, 'F1', 'Backend · 2')
+                backend = list(set(track(w)) - {scratch})[0]
+                clean(w, 'BACKEND')
+                activate(w, 'F2', 'Admin · 3')
+                admin = list(set(track(w)) - {scratch, backend})[0]
+                clean(w, 'ADMIN', bash=True)
+                pids = track(w)
+                assert len(pids) == 3
+                report['original_shell_pids'] = {'Backend': backend, 'Admin': admin, 'Scratch': scratch}
+                activate(w, 'F3', 'Scratch')
+                proof, sizes = reader(w, 'symbol-routing')
+                # Repeat only routing/resize prerequisites for the unfinished copy phase.
+                choose(w, 'shield')
+                choose(w, None)
+                choose(w, 'branch')
+                chooser(w)
+                w.key('Home')
+                w.key('Escape')
+                w.key('Escape')
+                w.key('ctrl+shift+w')
+                assert 'Schließen bestätigen' not in w.title()
+                click(w, 235, 635)
+                wait_for(lambda: 'Schließen bestätigen' in w.title())
+                w.key('Escape')
+                wait_for(lambda: 'Schließen bestätigen' not in w.title())
+                initial_size = read_json(sizes)
+                sized(w, 640, 600)
+                wait_for(lambda: read_json(sizes) != initial_size)
+                narrow_size = read_json(sizes)
+                chooser(w)
+                w.key('End')
+                w.key('Escape')
+                w.key('Escape')
+                sized(w, 1280)
+                wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
+                assert read_json(file) == state and track(w) == pids
+                report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
+            else:
+                w = make_window('01-live')
+                backend = track(w)[0]
+                clean(w, 'BACKEND')
+                configure(w, 'Backend', 311, 'F1')
+                chooser(w)
+                shot(w, '01-local-catalog-names-and-focus.png')
+                w.key('End')
+                w.key('Escape')  # Chooser cancel leaves the editor draft untouched.
+                w.key('Return')
+                assert not file.exists() and track(w) == [backend]
+                chooser(w)
+                click(w, 825, 160)  # Code, then cancel the entire draft.
+                w.key('Escape')
+                wait_for(lambda: 'Tab bearbeiten' not in w.title())
+                assert not file.exists() and track(w) == [backend]
+                choose(w, 'code')
+                base['save_current'](w, literal)
+                wait_for(lambda: read_json(file) and len(read_json(file)['items']) == 1)
+                assert read_json(file)['items'][0]['identity']['symbol'] == 'code'
+                assert track(w) == [backend]
+                w.key('ctrl+shift+b')
+                wait_for(lambda: 'bash · 2' in w.title())
+                admin = list(set(track(w)) - {backend})[0]
+                clean(w, 'ADMIN', bash=True)
+                configure(w, 'Admin', 430, 'F2')
+                choose(w, 'server', mouse=True)
+                base['save_current'](w, bash_dir, bash=True)
+                wait_for(lambda: len(read_json(file)['items']) == 2)
+                assert read_json(file)['items'][1]['identity']['symbol'] == 'server'
+                click(w, 65, 635)  # Actual pin state remains independent of icons.
+                wait_for(lambda: read_json(file)['items'][1]['pinned'] is True)
+                w.key('ctrl+shift+t')
+                wait_for(lambda: 'zsh · 3' in w.title())
+                scratch = list(set(track(w)) - {backend, admin})[0]
+                clean(w, 'SCRATCH')
+                configure(w, 'Scratch', 256, 'F3')
+                choose(w, 'folder')
+                pids = track(w)
+                state = snapshot('01-three-tabs-two-templates.json')
+                ids = [t['id'] for t in state['items']]
+                assert len(pids) == 3 and len(state['items']) == 2
+                report['original_shell_pids'] = {'Backend': backend, 'Admin': admin, 'Scratch': scratch}
+                shot(w, '02-three-symbols-linked-ordinary-and-pin.png')
+                activate(w, 'F2', 'Admin')
+                ticker = output / 'ticker.py'
+                ticker_pid = output / 'ticker-pid.json'
+                ticker.write_text("import json,os,sys,time\nfrom pathlib import Path\nPath(sys.argv[1]).write_text(json.dumps({'pid':os.getpid()}))\nfor i in range(40):\n print('HOO22 inactive',i,flush=True); time.sleep(.025)\n")
+                w.run('python3 ' + shlex.quote(str(ticker)) + ' ' + shlex.quote(str(ticker_pid)) + "; printf '\\033]2;HOO-22 inactive-done\\007'")
+                wait_for(lambda: read_json(ticker_pid))
+                owned[read_json(ticker_pid)['pid']] = start_time(read_json(ticker_pid)['pid'])
+                activate(w, 'F3', 'Scratch')
+                proof, sizes = reader(w, 'symbol-routing')
+                choose(w, 'shield')
+                assert track(w) == pids and read_json(file) == state
+                choose(w, None)
+                shot(w, '03-symbol-removed-without-changing-identity.png')
+                choose(w, 'branch')
+                chooser(w)
+                w.key('Home')
+                w.key('Escape')
+                w.key('Escape')
+                assert read_json(file) == state and track(w) == pids
+                click(w, 65, 635)  # Temporary pinned tab must still not become a template.
+                w.key('ctrl+shift+w')
+                assert 'Schließen bestätigen' not in w.title() and track(w) == pids
+                click(w, 235, 635)
+                wait_for(lambda: 'Schließen bestätigen' in w.title())
+                shot(w, '04-symbol-does-not-override-pin-or-close-target.png')
+                w.key('Escape')
+                wait_for(lambda: 'Schließen bestätigen' not in w.title())
+                assert track(w) == pids
+                activate(w, 'F2', 'Admin')
+                wait_for(lambda: 'inactive-done' in w.title())
+                choose(w, 'database')
+                wait_for(lambda: read_json(file)['items'][1]['identity']['symbol'] == 'database')
+                assert read_json(file)['items'][1]['pinned'] is True
+                assert [t['id'] for t in read_json(file)['items']] == ids
+                shot(w, '05-inactive-output-and-linked-symbol-change.png')
+                activate(w, 'F3', 'Scratch')
+                initial_size = read_json(sizes)
+                sized(w, 640, 600)
+                wait_for(lambda: read_json(sizes) != initial_size)
+                narrow_size = read_json(sizes)
+                chooser(w)
+                w.key('End')
+                w.key('Escape')
+                w.key('Escape')
+                sized(w, 1280)
+                wait_for(lambda: read_json(sizes)['columns'] > narrow_size['columns'])
+                report['raw_pty_sizes'] = {'initial': initial_size, 'narrow': narrow_size, 'wide': read_json(sizes)}
+            # Redraw the fixture after reflow instead of assuming old content
+            # stays on row one while dialogs change the terminal viewport.
+            raw_pid = read_json(sizes)['pid']
+            assert start_time(raw_pid) == owned[raw_pid]
+            os.kill(raw_pid, signal.SIGWINCH)
+            time.sleep(.2)
             clipboard(b'HOO22_COPY_SENTINEL')
             w.focus()
             command('xdotool', 'mousemove', '--window', w.id, '12', '72')
