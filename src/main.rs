@@ -1,3 +1,4 @@
+mod tab_strip;
 mod view;
 
 use hoori_term::build_info;
@@ -71,6 +72,12 @@ enum Message {
     Event(Event, iced::event::Status),
     Resize(hoori_term::tabs::TabId, GridSize),
     Open(hoori_term::tabs::Shell),
+    Strip(tab_strip::Target),
+    StripWidth(f32),
+    StripScroll(f32),
+    StripHover(Option<tab_strip::Target>),
+    ChooseShell(usize),
+    CancelLaunch,
     Activate(hoori_term::tabs::TabId),
     Close(hoori_term::tabs::CloseTarget),
     Select {
@@ -116,6 +123,8 @@ struct App {
     editing: Option<TabEditor>,
     closing: bool,
     pending_shutdowns: usize,
+    strip: tab_strip::State,
+    launching: Option<usize>,
     cache: canvas::Cache,
 }
 
@@ -135,6 +144,8 @@ impl App {
             editing: None,
             closing: false,
             pending_shutdowns: 0,
+            strip: tab_strip::State::default(),
+            launching: None,
             cache: canvas::Cache::new(),
         }
     }
@@ -152,6 +163,8 @@ impl App {
             format!("Schließen bestätigen — {title}")
         } else if self.editing.is_some() {
             format!("Tab bearbeiten — {title}")
+        } else if self.launching.is_some() {
+            format!("Neue Sitzung — {title}")
         } else {
             title
         })
@@ -185,6 +198,8 @@ impl App {
             return Task::none();
         }
         self.editing = None;
+        self.launching = None;
+        self.strip.focused = None;
         if self.tabs.running_names(target).is_empty() {
             self.close(target)
         } else {
@@ -198,6 +213,7 @@ impl App {
         let sessions = self.tabs.remove(target);
         self.cache.clear();
         self.closing = self.tabs.items.is_empty();
+        self.reveal_active();
         if sessions.is_empty() {
             return if self.closing && self.pending_shutdowns == 0 {
                 iced::exit()
@@ -236,6 +252,27 @@ impl App {
         if self.closing {
             return Task::none();
         }
+        if let Some(selected) = self.launching {
+            return match key {
+                Key::Named(Named::Escape) => self.update(Message::CancelLaunch),
+                Key::Named(Named::Enter) | Key::Named(Named::Space) => {
+                    if selected < 2 {
+                        self.update(Message::ChooseShell(selected))
+                    } else {
+                        self.update(Message::CancelLaunch)
+                    }
+                }
+                Key::Named(Named::ArrowUp | Named::ArrowLeft) => {
+                    self.launching = Some((selected + 2) % 3);
+                    Task::none()
+                }
+                Key::Named(Named::ArrowDown | Named::ArrowRight | Named::Tab) => {
+                    self.launching = Some((selected + if modifiers.shift() { 2 } else { 1 }) % 3);
+                    Task::none()
+                }
+                _ => Task::none(),
+            };
+        }
         if let Some(editor) = &mut self.editing {
             if key == Key::Named(Named::Escape) && modifiers.is_empty() {
                 if editor.recording {
@@ -273,7 +310,11 @@ impl App {
             return self.action(action);
         }
         if let Some(id) = self.tabs.shortcut_target(&key, modifiers) {
+            self.strip.focused = None;
             return self.update(Message::Activate(id));
+        }
+        if self.strip.focused.is_some() {
+            return self.strip_keyboard(key, modifiers);
         }
         if let Some(tab) = self.tabs.current_mut()
             && let Some(bytes) =
@@ -293,6 +334,12 @@ impl App {
             Action::NewBash => return self.update(Message::Open(Shell::bash())),
             Action::NextTab | Action::PreviousTab => {
                 self.tabs.cycle(action == Action::NextTab);
+                self.strip.focused = None;
+                self.reveal_active();
+            }
+            Action::FocusTabs => {
+                self.strip.focused = self.tabs.active.map(tab_strip::Target::Tab);
+                self.reveal_active();
             }
             Action::CloseTab => {
                 if let Some(id) = self.tabs.active {
@@ -327,6 +374,60 @@ impl App {
         Task::none()
     }
 
+    fn reveal_active(&mut self) {
+        if let Some(id) = self.tabs.active {
+            self.strip.reveal(&self.tabs, id);
+        }
+    }
+
+    fn strip_keyboard(
+        &mut self,
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Task<Message> {
+        use keyboard::{Key, key::Named};
+        use tab_strip::Target;
+        match key {
+            Key::Named(Named::Escape) => self.strip.focused = None,
+            Key::Named(Named::Tab) => self.strip.traverse(&self.tabs, modifiers.shift()),
+            Key::Named(Named::ArrowLeft | Named::ArrowRight | Named::Home | Named::End) => {
+                let id = match self.strip.focused {
+                    Some(Target::Tab(id) | Target::Close(id)) => Some(id),
+                    _ => self.tabs.active,
+                };
+                let current = self
+                    .tabs
+                    .items
+                    .iter()
+                    .position(|t| Some(t.id) == id)
+                    .unwrap_or(0);
+                let last = self.tabs.items.len().saturating_sub(1);
+                let index = match key {
+                    Key::Named(Named::ArrowLeft) => current.saturating_sub(1),
+                    Key::Named(Named::ArrowRight) => (current + 1).min(last),
+                    Key::Named(Named::Home) => 0,
+                    _ => last,
+                };
+                if let Some(tab) = self.tabs.items.get(index) {
+                    self.strip.focused = Some(Target::Tab(tab.id));
+                    self.strip.reveal(&self.tabs, tab.id);
+                }
+            }
+            Key::Named(Named::Enter | Named::Space) => {
+                if let Some(target) = self.strip.focused {
+                    return self.update(Message::Strip(target));
+                }
+            }
+            Key::Named(Named::Delete) => {
+                if let Some(Target::Tab(id) | Target::Close(id)) = self.strip.focused {
+                    return self.request_close(CloseTarget::Tab(id));
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         // Dialogs freeze commands and selection, but transport/status updates
         // continue for every tab. No queued paste can bypass a close dialog.
@@ -335,6 +436,7 @@ impl App {
                 message,
                 Message::Tick(_)
                     | Message::Resize(..)
+                    | Message::StripWidth(_)
                     | Message::Event(..)
                     | Message::CancelClose
                     | Message::ConfirmClose
@@ -348,6 +450,7 @@ impl App {
                 message,
                 Message::Tick(_)
                     | Message::Resize(..)
+                    | Message::StripWidth(_)
                     | Message::Event(..)
                     | Message::EditName(_)
                     | Message::EditAccent(_)
@@ -355,6 +458,20 @@ impl App {
                     | Message::ClearShortcut
                     | Message::ApplyEdit
                     | Message::CancelEdit
+                    | Message::ShutdownComplete
+            )
+        {
+            return Task::none();
+        }
+        if self.launching.is_some()
+            && !matches!(
+                message,
+                Message::Tick(_)
+                    | Message::Resize(..)
+                    | Message::StripWidth(_)
+                    | Message::Event(..)
+                    | Message::ChooseShell(_)
+                    | Message::CancelLaunch
                     | Message::ShutdownComplete
             )
         {
@@ -378,6 +495,7 @@ impl App {
                 }
             }
             Message::Open(shell) => {
+                self.strip.focused = None;
                 let size = self
                     .tabs
                     .current()
@@ -385,11 +503,47 @@ impl App {
                     .unwrap_or(GridSize::new(98, 30));
                 self.error = self.tabs.open(&shell, size).err();
                 self.cache.clear();
+                self.reveal_active();
             }
             Message::Activate(id) => {
                 self.tabs.activate(id);
                 self.cache.clear();
+                self.reveal_active();
             }
+            Message::Strip(target) => {
+                use tab_strip::Target;
+                match target {
+                    Target::Tab(id) => {
+                        self.strip.focused = None;
+                        return self.update(Message::Activate(id));
+                    }
+                    Target::Close(id) => return self.update(Message::Close(CloseTarget::Tab(id))),
+                    Target::Previous => self.strip.scroll(self.tabs.items.len(), -224.0),
+                    Target::Next => self.strip.scroll(self.tabs.items.len(), 224.0),
+                    Target::Plus => {
+                        self.launching = Some(0);
+                        self.strip.focused = None;
+                    }
+                }
+            }
+            Message::StripWidth(width) => {
+                self.strip.width = width;
+                self.reveal_active();
+            }
+            Message::StripScroll(delta) => self.strip.scroll(self.tabs.items.len(), delta),
+            Message::StripHover(target) => self.strip.hovered = target,
+            Message::ChooseShell(index) => {
+                // Only an explicit choice from the currently open menu starts
+                // a session; stale/repeated choice messages cannot start twice.
+                if self.launching.take().is_some() && index < 2 {
+                    return self.update(Message::Open(if index == 0 {
+                        Shell::zsh()
+                    } else {
+                        Shell::bash()
+                    }));
+                }
+            }
+            Message::CancelLaunch => self.launching = None,
             Message::Close(target) => return self.request_close(target),
             Message::Event(Event::Window(window::Event::CloseRequested), _) => {
                 return self.request_close(CloseTarget::Window);
@@ -402,7 +556,10 @@ impl App {
                     ..
                 }),
                 status,
-            ) if self.editing.is_some() || status == iced::event::Status::Ignored => {
+            ) if self.editing.is_some()
+                || self.launching.is_some()
+                || status == iced::event::Status::Ignored =>
+            {
                 return self.keyboard(key, modifiers, text.map(|t| t.to_string()));
             }
             Message::Select {
@@ -412,6 +569,7 @@ impl App {
                 side,
                 start,
             } => {
+                self.strip.focused = None;
                 if self.tabs.active == Some(id)
                     && let Some(tab) = self.tabs.get_mut(id)
                 {
@@ -470,6 +628,7 @@ impl App {
                 }
             }
             Message::Edit(id) => {
+                self.strip.focused = None;
                 if let Some(tab) = self.tabs.get(id) {
                     self.editing = Some(TabEditor {
                         id,
@@ -546,51 +705,71 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        use iced::widget::scrollable;
-        let interactive = self.confirming.is_none() && self.editing.is_none() && !self.closing;
-        let mut tab_row = row![].spacing(5).align_y(iced::Center);
-        for tab in &self.tabs.items {
-            let marker = match tab.state() {
-                ProcessState::Running => "",
-                ProcessState::Exited(_) => " · beendet",
-                ProcessState::Failed(_) => " · Fehler",
+        use iced::widget::tooltip;
+        let interactive = self.confirming.is_none()
+            && self.editing.is_none()
+            && self.launching.is_none()
+            && !self.closing;
+        let header = canvas(tab_strip::TabStrip {
+            tabs: &self.tabs,
+            state: &self.strip,
+            interactive,
+        })
+        .width(Fill)
+        .height(tab_strip::HEIGHT);
+        let inspection = match self.strip.hovered {
+            Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.tabs.get(id).map(|tab| {
+                let shortcut = tab.identity.shortcut.as_ref().map(|s| format!(" · {}", s.label())).unwrap_or_default();
+                format!("{}{}{}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut)
+            }).unwrap_or_default(),
+            Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
+            Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
+            None => "Tableiste: Strg+Umschalt+L · Pfeile/Tab navigieren · Enter auswählen · Esc zurück zum Terminal".into(),
+        };
+        let mut content = column![
+            tooltip(
+                header,
+                container(text(inspection).size(12).width(420))
+                    .padding(8)
+                    .style(container::rounded_box),
+                tooltip::Position::Bottom
+            )
+            .delay(std::time::Duration::from_millis(if interactive {
+                600
+            } else {
+                60_000
+            }))
+        ];
+        if let Some(selected) = self.launching {
+            let choice = |label: &'static str, index: usize, message: Message| {
+                button(label).on_press(message).style(move |theme, status| {
+                    if selected == index {
+                        button::primary(theme, status)
+                    } else {
+                        button::secondary(theme, status)
+                    }
+                })
             };
-            let active = self.tabs.active == Some(tab.id);
-            let accent = tab.identity.accent;
-            let shortcut = tab
-                .identity
-                .shortcut
-                .as_ref()
-                .map(|s| format!("  [{}]", s.label()))
-                .unwrap_or_default();
-            tab_row = tab_row.push(
-                row![
-                    button(text(format!("{}{marker}{shortcut}", tab.label())).size(14))
-                        .on_press_maybe(interactive.then_some(Message::Activate(tab.id)))
-                        .style(move |theme, status| {
-                            accent_style(theme, status, accent, active)
-                        }),
-                    button("×")
-                        .on_press_maybe(
-                            interactive.then_some(Message::Close(CloseTarget::Tab(tab.id)))
-                        )
-                        .style(button::text)
-                ]
-                .spacing(1),
+            content = content.push(
+                container(
+                    column![
+                        text("Neue Sitzung").size(18),
+                        text("Shell bewusst auswählen · Pfeile/Tab, Enter · Esc bricht ab")
+                            .size(12),
+                        row![
+                            choice("zsh öffnen", 0, Message::ChooseShell(0)),
+                            choice("Bash öffnen", 1, Message::ChooseShell(1)),
+                            space::horizontal(),
+                            choice("Abbrechen", 2, Message::CancelLaunch)
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(10),
+                )
+                .padding(12)
+                .style(container::rounded_box),
             );
         }
-        let header = row![
-            scrollable(tab_row)
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new()
-                ))
-                .width(Fill),
-            button("+ zsh").on_press_maybe(interactive.then_some(Message::Open(Shell::zsh()))),
-            button("+ Bash").on_press_maybe(interactive.then_some(Message::Open(Shell::bash())))
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
-        let mut content = column![container(header).padding(8).height(52)];
         if let Some(target) = self.confirming {
             let names = self.tabs.running_names(target);
             let title = if names.is_empty() {
@@ -955,6 +1134,54 @@ mod tests {
     }
 
     #[test]
+    fn shell_menu_requires_one_explicit_choice_and_rejects_stale_actions() {
+        use tab_strip::Target;
+        let mut app = app();
+        let first = app.tabs.active;
+        let _ = app.update(Message::Strip(Target::Plus));
+        assert_eq!(app.launching, Some(0));
+        assert_eq!(app.tabs.items.len(), 1);
+        let _ = app.update(Message::Open(Shell::bash()));
+        let _ = app.update(Message::Activate(TabId(999)));
+        let _ = app.keyboard(
+            Key::Character("t".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            None,
+        );
+        assert_eq!(app.tabs.items.len(), 1);
+        assert_eq!(app.tabs.active, first);
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::Escape),
+            Modifiers::empty(),
+            None,
+        );
+        assert!(app.launching.is_none());
+        let _ = app.update(Message::ChooseShell(1));
+        assert_eq!(app.tabs.items.len(), 1);
+
+        let _ = app.update(Message::Strip(Target::Plus));
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::ArrowDown),
+            Modifiers::empty(),
+            None,
+        );
+        assert_eq!(app.launching, Some(1));
+        let _ = app.keyboard(
+            Key::Named(keyboard::key::Named::Enter),
+            Modifiers::empty(),
+            None,
+        );
+        assert!(app.launching.is_none());
+        assert_eq!(app.tabs.items.len(), 2);
+        assert!(app.tabs.current().unwrap().label().starts_with("bash ·"));
+        let target = app.tabs.active;
+        let _ = app.update(Message::ChooseShell(1));
+        assert_eq!(app.tabs.items.len(), 2);
+        assert_eq!(app.tabs.active, target);
+        assert_eq!(app.tabs.running_names(CloseTarget::Window).len(), 2);
+    }
+
+    #[test]
     fn direct_actions_and_editor_input_never_also_reach_the_pty() {
         let script = "import os,tty; tty.setraw(0); os.write(1,b'\x1b]2;ready\x07'); data=bytearray()\nwhile True:\n data.extend(os.read(0,4096)); os.write(1,b'\x1b]2;data-'+data.hex().encode()+b'\x07')";
         let mut app = App::new(Options {
@@ -986,6 +1213,31 @@ mod tests {
         });
         let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
         assert_eq!(app.tabs.active, Some(first));
+        // Real raw-mode readers make extra bytes observable. Focus movement
+        // and both menu cancellation paths must not activate/start/send data.
+        let _ = app.action(Action::FocusTabs);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowRight), mods, None);
+        assert_eq!(app.strip.focused, Some(tab_strip::Target::Tab(second)));
+        assert_eq!(app.tabs.active, Some(first));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert_eq!(app.tabs.active, Some(second));
+        assert!(app.strip.focused.is_none());
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
+        let _ = app.update(Message::Strip(tab_strip::Target::Plus));
+        let _ = app.keyboard(Key::Character("x".into()), mods, Some("x".into()));
+        let _ = app.keyboard(
+            Key::Character("t".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            None,
+        );
+        let _ = app.update(Message::Pasted(first, Some("hidden".into())));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        let _ = app.update(Message::Strip(tab_strip::Target::Plus));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowUp), mods, None);
+        assert_eq!(app.launching, Some(2));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert!(app.launching.is_none());
+        assert_eq!(app.tabs.items.len(), 2);
         let _ = app.keyboard(Key::Character("q".into()), mods, Some("q".into()));
         wait(&mut app, |a| {
             a.tabs.get(first).unwrap().terminal.shell_title == "data-71"

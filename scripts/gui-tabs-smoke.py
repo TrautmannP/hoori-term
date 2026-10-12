@@ -46,7 +46,13 @@ def main():
     wait_for(lambda: "zsh · 2" in w.title())
     w.run("unset HISTFILE; printf '\\033[2J\\033[HSession TWO\\n'")
     w.marker("HOO-7 two-ready")
-    click(w, 955, 24)  # + Bash, in the owned 1000px window
+    before_menu = Path(f"/proc/{w.process.pid}/task/{w.process.pid}/children").read_text()
+    click(w, 972, 26)  # Fixed Plus target in the owned 1000px window.
+    wait_for(lambda: "Neue Sitzung" in w.title())
+    assert Path(f"/proc/{w.process.pid}/task/{w.process.pid}/children").read_text() == before_menu
+    w.screenshot(output / "00-shell-choice-without-start.png")
+    w.key("Down")
+    w.key("Return")
     wait_for(lambda: "bash · 3" in w.title())
     w.run("unset HISTFILE; PROMPT_COMMAND=; PS1='BASH> '; printf '\\033[2J\\033[HSession THREE\\n'")
     w.marker("HOO-7 three-ready")

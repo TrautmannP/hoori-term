@@ -18,13 +18,15 @@ cargo run --locked -- --shell /bin/bash -- --noprofile --norc -i
 ```
 
 Type directly into the active terminal. Standard navigation, Ctrl combinations
-and F1–F12 are sent only to that session. Click **+ zsh** / **+ Bash** to open
-sessions and a tab to activate it. Inactive tabs keep processing output.
+and unassigned F1–F12 are sent only to that session. Click **+** to choose zsh
+or Bash, then select the shell to start one session. Opening or canceling the
+choice starts none. Click a tab to activate it. Inactive tabs keep processing output.
 
 | Action | Keyboard / mouse |
 | --- | --- |
 | New session using the launch shell/arguments | Ctrl+Shift+T |
 | New Bash session | Ctrl+Shift+B |
+| Focus the tab strip | Ctrl+Shift+L |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Close active tab | Ctrl+Shift+W or its × button |
 | Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
@@ -51,9 +53,15 @@ recording, then cancels the draft; Enter applies a draft outside recording.
 Name-field input stays in that field, and other app/terminal actions are paused
 while editing. Every session continues processing output.
 
-Names remain visible when a shell changes its title. Accents affect tab buttons,
-with a bright outline for the active tab; terminal colors stay controlled by
-the terminal program. Direct shortcuts target the same open tab ID after
+Names remain visible when a shell changes its title. Connected tabs use colored
+accents and a neutral active outline/surface; terminal colors stay controlled by
+the terminal program. Long names are shortened in the strip; hover or the editor
+shows the full name. Scroll arrows and the mouse wheel move overflowing tabs;
+the Plus target stays available. Direct navigation reveals its target.
+With strip focus, arrows/Home/End move focus, Tab/Shift+Tab traverse tab/close/Plus
+targets, Enter/Space selects, Delete requests the focused tab's close, and Escape
+returns to terminal input. Focus movement alone preserves the active terminal.
+Direct shortcuts target the same open tab ID after
 renaming, color changes or removal of preceding tabs. A closed tab's binding
 is removed and never inherited by a new tab. Shortcuts activate existing tabs,
 including their retained exit/error states. They are local to the focused
@@ -101,6 +109,8 @@ covers editing, conflicts and direct shortcut routing. Native Wayland and Window
 evidence remain separate gates.
 The [refresh comparison](docs/hoo-15-refresh-comparison.md) records the bounded
 HOO-15 `top`/GNOME investigation, raw evidence, timing limits and follow-up proposal.
+The [connected tab-strip validation](docs/hoo-19-tab-strip.md) describes the
+HOO-19 layout, input routing and real comparison/regression procedure.
 
 ## Versioned review builds
 
