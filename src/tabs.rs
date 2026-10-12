@@ -1,9 +1,70 @@
 //! Stable session identity, terminal state and bounded output processing.
 use crate::session::{ProcessState, Session};
+use crate::shortcuts::Shortcut;
 use crate::terminal::{GridSize, Terminal};
 use std::time::{Duration, Instant};
 
 pub const MAX_TABS: usize = 16;
+pub const MAX_NAME_CHARS: usize = 40;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Accent {
+    #[default]
+    Default,
+    Cyan,
+    Blue,
+    Green,
+    Yellow,
+    Orange,
+    Red,
+    Purple,
+}
+
+impl Accent {
+    pub const ALL: [Self; 8] = [
+        Self::Default,
+        Self::Cyan,
+        Self::Blue,
+        Self::Green,
+        Self::Yellow,
+        Self::Orange,
+        Self::Red,
+        Self::Purple,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Standard",
+            Self::Cyan => "Türkis",
+            Self::Blue => "Blau",
+            Self::Green => "Grün",
+            Self::Yellow => "Gelb",
+            Self::Orange => "Orange",
+            Self::Red => "Rot",
+            Self::Purple => "Violett",
+        }
+    }
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Self::Default => [165, 173, 206],
+            Self::Cyan => [80, 210, 225],
+            Self::Blue => [120, 170, 255],
+            Self::Green => [140, 210, 130],
+            Self::Yellow => [235, 210, 100],
+            Self::Orange => [245, 165, 100],
+            Self::Red => [245, 120, 145],
+            Self::Purple => [195, 145, 245],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub name: Option<String>,
+    pub accent: Accent,
+    pub shortcut: Option<Shortcut>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
@@ -31,7 +92,8 @@ impl Shell {
 
 pub struct Tab {
     pub id: TabId,
-    pub label: String,
+    default_label: String,
+    pub identity: Identity,
     pub terminal: Terminal,
     pub session: Option<Session>,
     pub error: Option<String>,
@@ -52,10 +114,24 @@ impl Tab {
         };
         Self {
             id,
-            label: format!("{name} · {}", id.0),
+            default_label: format!("{name} · {}", id.0),
+            identity: Identity::default(),
             terminal: Terminal::new(size),
             session,
             error,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        self.identity.name.as_deref().unwrap_or(&self.default_label)
+    }
+
+    /// Custom names need not be unique; always identify confirmation targets.
+    pub fn description(&self) -> String {
+        if self.identity.name.is_some() {
+            format!("{} · {}", self.label(), self.id.0)
+        } else {
+            self.default_label.clone()
         }
     }
 
@@ -180,12 +256,88 @@ impl Tabs {
         self.active = Some(self.items[next].id);
     }
 
+    pub fn shortcut_target(
+        &self,
+        key: &iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Option<TabId> {
+        self.items
+            .iter()
+            .find(|tab| {
+                tab.identity
+                    .shortcut
+                    .as_ref()
+                    .is_some_and(|shortcut| shortcut.matches(key, modifiers))
+            })
+            .map(|tab| tab.id)
+    }
+
+    pub fn check_shortcut(&self, id: TabId, shortcut: &Shortcut) -> Result<(), String> {
+        if let Some(action) = shortcut.reserved_action() {
+            return Err(format!(
+                "{} ist für „{}“ reserviert",
+                shortcut.label(),
+                action.label()
+            ));
+        }
+        if let Some(other) = self
+            .items
+            .iter()
+            .find(|tab| tab.id != id && tab.identity.shortcut.as_ref() == Some(shortcut))
+        {
+            return Err(format!(
+                "{} ist bereits „{}“ zugeordnet",
+                shortcut.label(),
+                other.description()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate everything before mutating any setting. The PTY and terminal
+    /// state are untouched, and bindings disappear with their owning tab.
+    pub fn configure(
+        &mut self,
+        id: TabId,
+        name: &str,
+        accent: Accent,
+        shortcut: Option<Shortcut>,
+    ) -> Result<(), String> {
+        if self.get(id).is_none() {
+            return Err("Dieser Tab ist nicht mehr geöffnet".into());
+        }
+        if name.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        }) {
+            return Err("Der Name darf keine Steuer- oder Richtungszeichen enthalten".into());
+        }
+        let name = name.trim();
+        if name.chars().count() > MAX_NAME_CHARS {
+            return Err(format!(
+                "Der Name darf höchstens {MAX_NAME_CHARS} Zeichen enthalten"
+            ));
+        }
+        if let Some(shortcut) = &shortcut {
+            self.check_shortcut(id, shortcut)?;
+        }
+        self.get_mut(id).unwrap().identity = Identity {
+            name: (!name.is_empty()).then(|| name.to_owned()),
+            accent,
+            shortcut,
+        };
+        Ok(())
+    }
+
     pub fn running_names(&self, target: CloseTarget) -> Vec<String> {
         self.items
             .iter()
             .filter(|t| target == CloseTarget::Window || target == CloseTarget::Tab(t.id))
             .filter(|t| t.state() == ProcessState::Running)
-            .map(|t| t.label.clone())
+            .map(Tab::description)
             .collect()
     }
 
