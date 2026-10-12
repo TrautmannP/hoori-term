@@ -1,6 +1,9 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Osc52};
 use alacritty_terminal::vte::ansi::Processor;
 use std::sync::{Arc, Mutex};
@@ -116,6 +119,30 @@ impl Terminal {
         self.size = size;
         self.term.resize(size);
     }
+
+    pub fn scroll(&mut self, lines: i32) {
+        self.term.scroll_display(Scroll::Delta(lines));
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+    pub fn scroll_to_top(&mut self) {
+        self.term.scroll_display(Scroll::Top);
+    }
+
+    pub fn select(&mut self, row: usize, column: usize, side: Side, start: bool) {
+        let offset = self.term.grid().display_offset();
+        let point = Point::new(
+            Line(row.min(self.size.rows as usize - 1) as i32 - offset as i32),
+            Column(column.min(self.size.columns as usize - 1)),
+        );
+        if start {
+            self.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        } else if let Some(selection) = &mut self.term.selection {
+            selection.update(point, side);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +181,25 @@ mod tests {
         assert!(replies[0].starts_with(b"\x1b["));
         t.feed(b"\x1b]2;safe title\x07");
         assert_eq!(t.shell_title, "safe title");
+    }
+
+    #[test]
+    fn scrollback_discards_old_lines_and_selection_uses_visible_coordinates() {
+        let mut t = Terminal::new(GridSize::new(40, 4));
+        for i in 0..5000 {
+            t.feed(format!("line {i:04}\r\n").as_bytes());
+        }
+        assert_eq!(t.term.grid().history_size(), HISTORY_LINES);
+        t.scroll_to_top();
+        let top: String = t.term.grid().display_iter().map(|c| c.cell.c).collect();
+        assert!(!top.contains("line 0000"));
+        assert!(top.contains("line 2997"));
+        t.select(0, 0, Side::Left, true);
+        t.select(0, 8, Side::Right, false);
+        assert_eq!(t.term.selection_to_string().as_deref(), Some("line 2997"));
+        t.scroll_to_bottom();
+        let bottom: String = t.term.grid().display_iter().map(|c| c.cell.c).collect();
+        assert!(bottom.contains("line 4999"));
+        assert_eq!(t.term.grid().display_offset(), 0);
     }
 }

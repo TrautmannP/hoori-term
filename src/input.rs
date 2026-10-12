@@ -1,6 +1,24 @@
 use alacritty_terminal::term::TermMode;
 use iced::keyboard::{Key, Modifiers, key::Named};
 
+/// One atomic transport entry, including bracket markers. Reject oversized
+/// pastes before sending any bytes; never leave a program inside paste mode.
+pub fn paste(text: &str, mode: TermMode) -> Result<Vec<u8>, String> {
+    if text.len() > crate::session::MAX_WRITE_BYTES - 12 {
+        return Err("Einfügen ist auf knapp 64 KiB begrenzt; nichts wurde gesendet".into());
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text: String = text
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect();
+    if mode.contains(TermMode::BRACKETED_PASTE) {
+        Ok(format!("\x1b[200~{text}\x1b[201~").into_bytes())
+    } else {
+        Ok(text.replace('\n', "\r").into_bytes())
+    }
+}
+
 pub fn encode(
     key: &Key,
     modifiers: Modifiers,
@@ -104,6 +122,33 @@ pub fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paste_is_atomic_mode_aware_and_cannot_inject_bracket_markers() {
+        assert_eq!(
+            paste("a\r\nb\rc\n", TermMode::empty()).unwrap(),
+            b"a\rb\rc\r"
+        );
+        assert_eq!(
+            paste("Grüße\n\x1b[201~\x03\t", TermMode::BRACKETED_PASTE).unwrap(),
+            "\x1b[200~Grüße\n[201~\t\x1b[201~".as_bytes()
+        );
+        assert!(
+            paste(
+                &"x".repeat(crate::session::MAX_WRITE_BYTES),
+                TermMode::BRACKETED_PASTE
+            )
+            .is_err()
+        );
+        assert_eq!(
+            paste(
+                &"x".repeat(crate::session::MAX_WRITE_BYTES - 12),
+                TermMode::BRACKETED_PASTE
+            )
+            .unwrap()
+            .len(),
+            crate::session::MAX_WRITE_BYTES
+        );
+    }
     #[test]
     fn routes_controls_unicode_and_application_cursor_mode() {
         assert_eq!(

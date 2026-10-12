@@ -106,7 +106,7 @@ class Window:
     def request_close(self):
         self.focus()
         command("xdotool", "key", "--clearmodifiers", "alt+F4")
-        time.sleep(0.3)
+        wait_for(lambda: self.process.poll() is not None or "Schließen bestätigen" in self.title())
 
     def wait_exit(self):
         self.process.wait(timeout=8)
@@ -186,9 +186,7 @@ def main():
     w.marker("HOO-6 close-cancelled")
     report["cancel_preserves_session"] = True
     w.request_close()
-    geometry = command("xdotool", "getwindowgeometry", "--shell", w.id)
-    width = int(next(line.split("=")[1] for line in geometry.splitlines() if line.startswith("WIDTH=")))
-    command("xdotool", "mousemove", "--window", w.id, str(width - 85), "28", "click", "1")
+    w.key("Return")
     w.wait_exit()
     wait_for(lambda: not Path(f"/proc/{report['zsh_pid']}").exists())
     report["confirmed_close_reaps_shell"] = True

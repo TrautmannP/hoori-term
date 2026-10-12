@@ -114,3 +114,24 @@ fn saturated_input_returns_immediately_and_shutdown_interrupts_writer() {
     assert!(start.elapsed() < Duration::from_secs(1));
     session.shutdown();
 }
+
+#[test]
+fn large_paste_is_one_bounded_entry_and_is_not_partially_rejected() {
+    use hoori_term::session::MAX_WRITE_BYTES;
+    let session = Session::spawn(
+        "/bin/bash",
+        &[
+            "-c".into(),
+            "stty raw -echo; printf READY; head -c 65536; printf DONE".into(),
+        ],
+        GridSize::new(80, 24).pty(),
+    )
+    .unwrap();
+    wait_output(&session, b"READY");
+    assert!(session.write(vec![b'z'; MAX_WRITE_BYTES + 1]).is_err());
+    session.write(vec![b'x'; MAX_WRITE_BYTES]).unwrap();
+    let output = wait_output(&session, b"DONE");
+    assert_eq!(output.len(), MAX_WRITE_BYTES + 4);
+    assert!(output[..MAX_WRITE_BYTES].iter().all(|b| *b == b'x'));
+    session.shutdown();
+}
