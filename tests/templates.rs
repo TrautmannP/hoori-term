@@ -1,5 +1,6 @@
 use hoori_term::session::ProcessState;
 use hoori_term::shortcuts::Shortcut;
+use hoori_term::symbols::Symbol;
 use hoori_term::tabs::{Accent, CloseTarget, Identity, Shell, TabId, Tabs};
 use hoori_term::templates::{
     Catalog, MAX_FILE_BYTES, Template, TemplateFile, TemplateId, TemplateShell,
@@ -60,10 +61,26 @@ fn draft(name: &str, key: Named, directory: &str) -> Template {
             accent: Accent::Blue,
             shortcut: Some(binding(key)),
             symbol: None,
+            compact: false,
         },
         shell: TemplateShell::Bash,
         directory: directory.into(),
         pinned: false,
+    }
+}
+
+fn identity(
+    name: &str,
+    accent: Accent,
+    shortcut: Option<Shortcut>,
+    symbol: Option<Symbol>,
+) -> Identity {
+    Identity {
+        name: Some(name.into()),
+        accent,
+        shortcut,
+        symbol,
+        compact: false,
     }
 }
 
@@ -88,17 +105,18 @@ fn linked_identity_changes_and_removal_never_touch_terminal_or_process() {
             .configure_tab(
                 &mut tabs,
                 linked,
-                "Web",
-                Accent::Green,
-                Some(binding(Named::F9)),
-                None,
+                identity("Web", Accent::Green, Some(binding(Named::F9)), None),
             )
             .unwrap()
     );
     assert_eq!(catalog.get(id).unwrap().name(), "Web");
     assert!(
         !catalog
-            .configure_tab(&mut tabs, normal, "Temporary", Accent::Red, None, None)
+            .configure_tab(
+                &mut tabs,
+                normal,
+                identity("Temporary", Accent::Red, None, None)
+            )
             .unwrap()
     );
     assert_eq!(catalog.items.len(), 1);
@@ -159,10 +177,7 @@ fn conflicts_with_closed_templates_live_tabs_and_app_actions_are_atomic() {
             .configure_tab(
                 &mut tabs,
                 ordinary,
-                "Bad",
-                Accent::Red,
-                Some(binding(Named::F8)),
-                None,
+                identity("Bad", Accent::Red, Some(binding(Named::F8)), None),
             )
             .is_err()
     );
@@ -177,10 +192,7 @@ fn conflicts_with_closed_templates_live_tabs_and_app_actions_are_atomic() {
         .configure_tab(
             &mut tabs,
             ordinary,
-            "Ordinary",
-            Accent::Green,
-            Some(binding(Named::F9)),
-            None,
+            identity("Ordinary", Accent::Green, Some(binding(Named::F9)), None),
         )
         .unwrap();
     let mut edit = catalog.get(id).unwrap().clone();
@@ -524,10 +536,12 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
         .configure_tab(
             &mut tabs,
             tab,
-            "Symbols",
-            Accent::Green,
-            Some(binding(Named::F8)),
-            Some(Symbol::Code),
+            identity(
+                "Symbols",
+                Accent::Green,
+                Some(binding(Named::F8)),
+                Some(Symbol::Code),
+            ),
         )
         .unwrap();
     assert!(catalog.items.is_empty()); // Symbol choice never saves an ordinary tab.
@@ -536,21 +550,23 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
         .unwrap()
         .terminal
         .feed(b"kept\x1b]2;user-symbol-is-not-output\x07");
-    let identity = tabs.get(tab).unwrap().identity.clone();
+    let saved_identity = tabs.get(tab).unwrap().identity.clone();
     let mut saved_draft = draft("Symbols", Named::F8, "/tmp");
-    saved_draft.identity = identity.clone();
+    saved_draft.identity = saved_identity.clone();
     let id = catalog.save_tab(&mut tabs, tab, saved_draft).unwrap();
-    assert_eq!(catalog.get(id).unwrap().identity, identity);
+    assert_eq!(catalog.get(id).unwrap().identity, saved_identity);
     let stamp = file.save(&catalog, None).unwrap().stamp;
     for symbol in Symbol::ALL {
         catalog
             .configure_tab(
                 &mut tabs,
                 tab,
-                "Symbols",
-                Accent::Green,
-                Some(binding(Named::F8)),
-                Some(symbol),
+                identity(
+                    "Symbols",
+                    Accent::Green,
+                    Some(binding(Named::F8)),
+                    Some(symbol),
+                ),
             )
             .unwrap();
         let loaded = Catalog::from_bytes(&catalog.to_bytes().unwrap()).unwrap();
@@ -596,7 +612,11 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
     let tab_before = tabs.get(tab).unwrap().identity.clone();
     assert!(
         catalog
-            .configure_tab(&mut tabs, tab, "bad\nname", Accent::Red, None, None)
+            .configure_tab(
+                &mut tabs,
+                tab,
+                identity("bad\nname", Accent::Red, None, None)
+            )
             .is_err()
     );
     assert_eq!(catalog, before);
@@ -605,10 +625,7 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
         .configure_tab(
             &mut tabs,
             tab,
-            "Symbols",
-            Accent::Green,
-            Some(binding(Named::F8)),
-            None,
+            identity("Symbols", Accent::Green, Some(binding(Named::F8)), None),
         )
         .unwrap();
     assert!(tabs.get(tab).unwrap().identity.symbol.is_none());
@@ -633,10 +650,12 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
         .configure_tab(
             &mut tabs,
             tab,
-            "Symbols",
-            Accent::Green,
-            Some(binding(Named::F8)),
-            Some(Symbol::Folder),
+            identity(
+                "Symbols",
+                Accent::Green,
+                Some(binding(Named::F8)),
+                Some(Symbol::Folder),
+            ),
         )
         .unwrap();
     tabs.remove(CloseTarget::PinnedTab(tab));
@@ -658,4 +677,189 @@ fn symbols_roundtrip_validate_and_preserve_linked_identity_through_failed_storag
     assert!(tabs.get(reopened).unwrap().pinned);
     assert!(tabs.get(reopened).unwrap().identity.shortcut.is_none());
     assert!(tabs.get(reopened).unwrap().template.is_none());
+}
+
+#[test]
+fn compact_presentation_is_independent_and_survives_template_storage_errors_and_lifetime() {
+    let fixture = Fixture::new();
+    let file = fixture.file();
+    let mut tabs = Tabs::default();
+    let tab = model_tab(&mut tabs);
+    let other = model_tab(&mut tabs);
+    let mut catalog = Catalog::default();
+    catalog
+        .configure_tab(
+            &mut tabs,
+            tab,
+            identity(
+                "Identical names stay identifiable",
+                Accent::Green,
+                Some(binding(Named::F8)),
+                None,
+            ),
+        )
+        .unwrap();
+    let initial = tabs.get(tab).unwrap().identity.clone();
+    let other_identity = tabs.get(other).unwrap().identity.clone();
+    assert!(!initial.compact && initial.display_symbol().is_none());
+    tabs.get_mut(tab)
+        .unwrap()
+        .terminal
+        .feed(b"retained\x1b]2;runtime does not set compact\x07");
+    for (pinned, compact) in [
+        (false, true),
+        (true, true),
+        (true, false),
+        (false, false),
+        (false, true),
+    ] {
+        let previous_compact = tabs.get(tab).unwrap().identity.compact;
+        assert!(!catalog.set_pinned(&mut tabs, tab, pinned).unwrap());
+        assert_eq!(tabs.get(tab).unwrap().identity.compact, previous_compact);
+        assert!(!catalog.set_compact(&mut tabs, tab, compact).unwrap());
+        let source = tabs.get(tab).unwrap();
+        assert_eq!(source.pinned, pinned);
+        assert_eq!(source.identity.compact, compact);
+        assert_eq!(source.identity.name, initial.name);
+        assert_eq!(source.identity.accent, initial.accent);
+        assert_eq!(source.identity.shortcut, initial.shortcut);
+        assert!(source.identity.symbol.is_none());
+        assert_eq!(
+            source.identity.display_symbol(),
+            compact.then_some(Symbol::Terminal)
+        );
+        assert_eq!(source.terminal.shell_title, "runtime does not set compact");
+        assert_eq!(
+            tabs.shortcut_target(&Key::Named(Named::F8), Modifiers::empty()),
+            Some(tab)
+        );
+        assert_eq!(tabs.get(other).unwrap().identity, other_identity);
+        assert!(catalog.items.is_empty()); // Neither fallback nor compaction implicitly saves.
+    }
+    // Other identity edits preserve compact presentation, including the older
+    // name/accent/shortcut entry point, rather than resetting its default.
+    tabs.configure(
+        tab,
+        "Saved compact",
+        Accent::Green,
+        Some(binding(Named::F8)),
+    )
+    .unwrap();
+    assert!(tabs.get(tab).unwrap().identity.compact);
+    let mut chosen = tabs.get(tab).unwrap().identity.clone();
+    chosen.symbol = Some(Symbol::Star);
+    catalog.configure_tab(&mut tabs, tab, chosen).unwrap();
+    assert_eq!(
+        tabs.get(tab).unwrap().identity.display_symbol(),
+        Some(Symbol::Star)
+    );
+    catalog.set_pinned(&mut tabs, tab, true).unwrap();
+    let mut saved = draft("Saved compact", Named::F8, "/nonexistent/hoo24-future-cwd");
+    saved.identity = tabs.get(tab).unwrap().identity.clone();
+    let id = catalog.save_tab(&mut tabs, tab, saved).unwrap();
+    assert_eq!(tabs.items.len(), 2);
+    assert!(catalog.get(id).unwrap().identity.compact && catalog.get(id).unwrap().pinned);
+    let first = file.save(&catalog, None).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&first.stamp).unwrap();
+    legacy["items"][0]["identity"]
+        .as_object_mut()
+        .unwrap()
+        .remove("compact");
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&file.path, &legacy_bytes).unwrap();
+    assert!(
+        !file
+            .load()
+            .unwrap()
+            .catalog
+            .get(id)
+            .unwrap()
+            .identity
+            .compact
+    );
+    assert_eq!(fs::read(&file.path).unwrap(), legacy_bytes); // Loading does not rewrite legacy data.
+    for bad in [
+        serde_json::json!("true"),
+        serde_json::json!(null),
+        serde_json::json!(42),
+        serde_json::json!([]),
+    ] {
+        legacy["items"][0]["identity"]["compact"] = bad;
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&file.path, &bytes).unwrap();
+        assert!(file.load().is_err());
+        assert_eq!(fs::read(&file.path).unwrap(), bytes);
+    }
+    fs::write(&file.path, &first.stamp).unwrap();
+    assert!(catalog.set_compact(&mut tabs, tab, false).unwrap());
+    assert!(tabs.get(tab).unwrap().pinned);
+    assert_eq!(tabs.get(tab).unwrap().template, Some(id));
+    let before = catalog.clone();
+    let source_before = tabs.get(tab).unwrap().identity.clone();
+    let mut invalid = source_before.clone();
+    invalid.name = Some("bad\nname".into());
+    invalid.compact = true;
+    assert!(catalog.configure_tab(&mut tabs, tab, invalid).is_err());
+    assert_eq!(catalog, before);
+    assert_eq!(tabs.get(tab).unwrap().identity, source_before);
+    let lock = file.path.with_extension("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(file.save(&catalog, Some(&first.stamp)).is_err());
+    assert_eq!(fs::read(&file.path).unwrap(), first.stamp); // On-disk compact remains true.
+    assert!(!catalog.get(id).unwrap().identity.compact); // Pending model is not falsely durable.
+    fs::remove_dir(&lock).unwrap();
+    let retry = file.save(&catalog, Some(&first.stamp)).unwrap();
+    assert!(
+        !file
+            .load()
+            .unwrap()
+            .catalog
+            .get(id)
+            .unwrap()
+            .identity
+            .compact
+    );
+    assert!(catalog.set_compact(&mut tabs, tab, true).unwrap());
+    assert!(catalog.set_pinned(&mut tabs, tab, false).unwrap());
+    assert!(tabs.get(tab).unwrap().identity.compact);
+    assert!(catalog.set_pinned(&mut tabs, tab, true).unwrap());
+    file.save(&catalog, Some(&retry.stamp)).unwrap();
+    let grid: String = tabs
+        .get(tab)
+        .unwrap()
+        .terminal
+        .term
+        .grid()
+        .display_iter()
+        .map(|c| c.cell.c)
+        .collect();
+    assert!(grid.contains("retained"));
+    tabs.remove(CloseTarget::PinnedTab(tab));
+    assert_eq!(catalog.items.len(), 1); // Closing does not delete saved presentation.
+    let mut loaded = file.load().unwrap().catalog;
+    let mut restarted = Tabs::default();
+    let ordinary = model_tab(&mut restarted);
+    assert!(!restarted.get(ordinary).unwrap().identity.compact);
+    assert_eq!(restarted.items.len(), 1); // Loading starts no saved sessions.
+    let reopened = loaded
+        .open(&mut restarted, id, GridSize::new(80, 24))
+        .unwrap();
+    assert_ne!(reopened, ordinary);
+    assert!(restarted.get(reopened).unwrap().identity.compact);
+    assert!(restarted.get(reopened).unwrap().pinned);
+    assert_eq!(
+        loaded
+            .open(&mut restarted, id, GridSize::new(80, 24))
+            .unwrap(),
+        reopened
+    );
+    assert_eq!(restarted.items.len(), 2);
+    assert!(restarted.remove(CloseTarget::Tab(reopened)).is_empty());
+    assert!(restarted.get(reopened).is_some());
+    loaded.remove(&mut restarted, id).unwrap();
+    let source = restarted.get(reopened).unwrap();
+    assert!(source.identity.compact && source.pinned);
+    assert_eq!(source.identity.symbol, Some(Symbol::Star));
+    assert!(source.template.is_none() && source.identity.shortcut.is_none());
 }

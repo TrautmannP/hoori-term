@@ -1,8 +1,7 @@
 //! Explicit saved configuration, separate from live session identity.
 //! The catalog has no filesystem effects. File operations run on a worker.
 use crate::shortcuts::Shortcut;
-use crate::symbols::Symbol;
-use crate::tabs::{Accent, Identity, Shell, TabId, Tabs, validated_name};
+use crate::tabs::{Identity, Shell, TabId, Tabs, validated_name};
 use crate::terminal::GridSize;
 use iced::keyboard::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
@@ -233,14 +232,12 @@ impl Catalog {
         &mut self,
         tabs: &mut Tabs,
         tab: TabId,
-        name: &str,
-        accent: Accent,
-        shortcut: Option<Shortcut>,
-        symbol: Option<Symbol>,
+        mut identity: Identity,
     ) -> Result<bool, String> {
         let source = tabs.get(tab).ok_or("Dieser Tab ist nicht mehr geöffnet")?;
         let link = source.template;
-        if let Some(shortcut) = &shortcut {
+        identity.name = validated_name(identity.name.as_deref().unwrap_or_default())?;
+        if let Some(shortcut) = &identity.shortcut {
             self.check_shortcut(tabs, link, Some(tab), shortcut)?;
         }
         if let Some(id) = link {
@@ -248,21 +245,34 @@ impl Catalog {
                 .get(id)
                 .ok_or("Verknüpfte Vorlage nicht vorhanden")?
                 .clone();
-            draft.identity = Identity {
-                name: Some(
-                    validated_name(name)?.unwrap_or_else(|| source.original_label().to_owned()),
-                ),
-                accent,
-                shortcut,
-                symbol,
-            };
+            identity.name = Some(
+                identity
+                    .name
+                    .unwrap_or_else(|| source.original_label().to_owned()),
+            );
+            draft.identity = identity;
             self.edit(tabs, draft)?;
             Ok(true)
         } else {
-            tabs.configure(tab, name, accent, shortcut)?;
-            tabs.get_mut(tab).unwrap().identity.symbol = symbol;
+            tabs.get_mut(tab).unwrap().identity = identity;
             Ok(false)
         }
+    }
+
+    /// Change presentation independently of pin group, transport and symbol.
+    pub fn set_compact(
+        &mut self,
+        tabs: &mut Tabs,
+        tab: TabId,
+        compact: bool,
+    ) -> Result<bool, String> {
+        let mut identity = tabs
+            .get(tab)
+            .ok_or("Dieser Tab ist nicht mehr geöffnet")?
+            .identity
+            .clone();
+        identity.compact = compact;
+        self.configure_tab(tabs, tab, identity)
     }
 
     /// A linked change updates the existing template before moving the tab.

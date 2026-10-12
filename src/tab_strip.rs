@@ -11,6 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const HEIGHT: f32 = 52.0;
 const TAB_WIDTH: f32 = 224.0;
+const COMPACT_WIDTH: f32 = 104.0;
 const GROUP_GAP: f32 = 12.0;
 const BAR: Color = Color::from_rgb8(16, 18, 27);
 const HOVER: Color = Color::from_rgb8(31, 34, 48);
@@ -39,7 +40,7 @@ pub struct State {
 
 impl State {
     pub fn layout(&self, tabs: &Tabs) -> Layout {
-        Layout::new(self.width, tabs.items.len(), tabs.pinned_count())
+        Layout::new(self.width, tabs)
     }
 
     pub fn scroll(&mut self, tabs: &Tabs, delta: f32) {
@@ -51,8 +52,9 @@ impl State {
     pub fn reveal(&mut self, tabs: &Tabs, id: TabId) {
         if let Some(index) = tabs.items.iter().position(|tab| tab.id == id) {
             let layout = self.layout(tabs);
-            let left = layout.tab(index, 0.0).x - layout.viewport.x;
-            let right = left + TAB_WIDTH;
+            let rect = layout.tab(index, 0.0);
+            let left = rect.x - layout.viewport.x;
+            let right = left + rect.width;
             if left < self.offset {
                 self.offset = left;
             } else if right > self.offset + layout.viewport.width {
@@ -94,10 +96,11 @@ pub struct Layout {
     window: [Rectangle; 3],
     overflow: bool,
     group_boundary: Option<usize>,
+    slots: Vec<(f32, f32)>,
 }
 
 impl Layout {
-    pub fn new(width: f32, count: usize, pinned: usize) -> Self {
+    pub fn new(width: f32, tabs: &Tabs) -> Self {
         // The native minimum width is 640. Reserve the same chrome space at
         // every width: one complete tab remains revealable at that minimum.
         let width = width.max(640.0);
@@ -109,13 +112,27 @@ impl Layout {
                 Size::new(36.0, 36.0),
             )
         });
-        let group_boundary = (pinned > 0 && pinned < count).then_some(pinned);
-        let span = count as f32 * TAB_WIDTH
-            + if group_boundary.is_some() {
-                GROUP_GAP
-            } else {
-                0.0
-            };
+        let pinned = tabs.pinned_count();
+        let group_boundary = (pinned > 0 && pinned < tabs.items.len()).then_some(pinned);
+        let mut span = 0.0;
+        let slots = tabs
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                if group_boundary == Some(index) {
+                    span += GROUP_GAP;
+                }
+                let width = if tab.identity.compact {
+                    COMPACT_WIDTH
+                } else {
+                    TAB_WIDTH
+                };
+                let slot = (span, width);
+                span += width;
+                slot
+            })
+            .collect();
         let overflow = span > drag.x - 64.0;
         let left = if overflow { 68.0 } else { 8.0 };
         let viewport = Rectangle::new(
@@ -130,6 +147,7 @@ impl Layout {
             window,
             overflow,
             group_boundary,
+            slots,
         }
     }
 
@@ -155,26 +173,19 @@ impl Layout {
     }
 
     fn tab(&self, index: usize, offset: f32) -> Rectangle {
+        let (left, width) = self.slots[index];
         Rectangle::new(
-            Point::new(
-                self.viewport.x + index as f32 * TAB_WIDTH - offset
-                    + if self
-                        .group_boundary
-                        .is_some_and(|boundary| index >= boundary)
-                    {
-                        GROUP_GAP
-                    } else {
-                        0.0
-                    },
-                8.0,
-            ),
-            Size::new(TAB_WIDTH, HEIGHT - 8.0),
+            Point::new(self.viewport.x + left - offset, 8.0),
+            Size::new(width, HEIGHT - 8.0),
         )
     }
 
     fn close(tab: Rectangle) -> Rectangle {
         Rectangle::new(
-            Point::new(tab.x + TAB_WIDTH - 32.0, 18.0),
+            Point::new(
+                tab.x + tab.width - 32.0,
+                if tab.width < TAB_WIDTH { 10.0 } else { 18.0 },
+            ),
             Size::new(24.0, 24.0),
         )
     }
@@ -255,11 +266,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
             pointer.pressed = None;
             return None;
         }
-        let layout = Layout::new(
-            bounds.width,
-            self.tabs.items.len(),
-            self.tabs.pinned_count(),
-        );
+        let layout = Layout::new(bounds.width, self.tabs);
         let target = cursor
             .position_in(bounds)
             .and_then(|p| layout.hit(self.tabs, self.state.offset, p))
@@ -361,14 +368,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
         }
         match cursor
             .position_in(bounds)
-            .and_then(|p| {
-                Layout::new(
-                    bounds.width,
-                    self.tabs.items.len(),
-                    self.tabs.pinned_count(),
-                )
-                .hit(self.tabs, self.state.offset, p)
-            })
+            .and_then(|p| Layout::new(bounds.width, self.tabs).hit(self.tabs, self.state.offset, p))
             .filter(|target| self.enabled(*target))
         {
             Some(Target::Drag) => mouse::Interaction::Grab,
@@ -386,11 +386,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let layout = Layout::new(
-            bounds.width,
-            self.tabs.items.len(),
-            self.tabs.pinned_count(),
-        );
+        let layout = Layout::new(bounds.width, self.tabs);
         let hover = cursor
             .position_in(bounds)
             .and_then(|p| layout.hit(self.tabs, self.state.offset, p))
@@ -407,8 +403,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
         });
         frame.with_clip(layout.viewport, |frame| {
             if let Some(boundary) = layout.group_boundary {
-                let x = layout.viewport.x + boundary as f32 * TAB_WIDTH - self.state.offset
-                    + GROUP_GAP / 2.0;
+                let x = layout.tab(boundary, self.state.offset).x - GROUP_GAP / 2.0;
                 frame.fill_rectangle(Point::new(x - 1.0, 12.0), Size::new(2.0, 32.0), MUTED);
             }
             for (index, tab) in self.tabs.items.iter().enumerate() {
@@ -452,12 +447,12 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     // Open the bottom border into the terminal's surface.
                     frame.fill_rectangle(
                         Point::new(rect.x, HEIGHT - 2.0),
-                        Size::new(TAB_WIDTH, 2.0),
+                        Size::new(rect.width, 2.0),
                         view::BACKGROUND,
                     );
                 } else {
                     frame.fill_rectangle(
-                        Point::new(rect.x + TAB_WIDTH - 1.0, 20.0),
+                        Point::new(rect.x + rect.width - 1.0, 20.0),
                         Size::new(1.0, 20.0),
                         Color::from_rgb8(49, 54, 75),
                     );
@@ -467,7 +462,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     &Path::circle(Point::new(rect.x + 15.0, 30.0), 3.5),
                     Color::from_rgb8(r, g, b),
                 );
-                if let Some(symbol) = tab.identity.symbol {
+                if let Some(symbol) = tab.identity.display_symbol() {
                     crate::symbols_view::draw(
                         frame,
                         Some(symbol),
@@ -481,22 +476,24 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 } else {
                     28.0
                 };
-                tab_label(
-                    frame,
-                    ellipsis(
-                        tab.label(),
-                        if tab.identity.symbol.is_some() {
-                            16
-                        } else {
-                            18
-                        },
-                    ),
-                    Point::new(rect.x + name_offset, 12.0),
-                    14.0,
-                    TEXT,
-                    layout.viewport,
-                    188.0 - name_offset,
-                );
+                if !tab.identity.compact {
+                    tab_label(
+                        frame,
+                        ellipsis(
+                            tab.label(),
+                            if tab.identity.symbol.is_some() {
+                                16
+                            } else {
+                                18
+                            },
+                        ),
+                        Point::new(rect.x + name_offset, 12.0),
+                        14.0,
+                        TEXT,
+                        layout.viewport,
+                        188.0 - name_offset,
+                    );
+                }
                 let state = if tab.error.is_some() {
                     "Fehler"
                 } else {
@@ -512,7 +509,13 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     .as_ref()
                     .map(|s| s.label())
                     .unwrap_or_default();
-                let mut details = if state.is_empty() {
+                let mut details = if tab.identity.compact {
+                    if state.is_empty() {
+                        "läuft".into()
+                    } else {
+                        state.into()
+                    }
+                } else if state.is_empty() {
                     shortcut
                 } else if shortcut.is_empty() {
                     state.into()
@@ -524,8 +527,11 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 }
                 tab_label(
                     frame,
-                    ellipsis(&details, 24),
-                    Point::new(rect.x + 28.0, 32.0),
+                    ellipsis(&details, if tab.identity.compact { 14 } else { 24 }),
+                    Point::new(
+                        rect.x + if tab.identity.compact { 8.0 } else { 28.0 },
+                        if tab.identity.compact { 36.0 } else { 32.0 },
+                    ),
                     10.0,
                     if state == "Fehler" {
                         Color::from_rgb8(255, 150, 161)
@@ -533,7 +539,11 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         MUTED
                     },
                     layout.viewport,
-                    160.0,
+                    if tab.identity.compact {
+                        rect.width - 16.0
+                    } else {
+                        160.0
+                    },
                 );
                 let close = Layout::close(rect);
                 if hover == Some(Target::Close(tab.id)) {
@@ -554,7 +564,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         frame,
                         Rectangle::new(
                             Point::new(rect.x + 4.0, 12.0),
-                            Size::new(TAB_WIDTH - 8.0, 36.0),
+                            Size::new(rect.width - 8.0, 36.0),
                         ),
                     );
                 } else if self.state.focused == Some(Target::Close(tab.id)) {
@@ -755,7 +765,7 @@ mod tests {
             maximized: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, HEIGHT));
-        let point = Layout::new(1000.0, 0, 0).drag.center();
+        let point = Layout::new(1000.0, &tabs).drag.center();
         let cursor = mouse::Cursor::Available(point);
         let mut pointer = PointerState {
             width: 1000.0,
@@ -929,5 +939,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mixed_widths_reveal_and_hit_each_identity_without_changing_pins_or_presentation() {
+        let mut tabs = Tabs::default();
+        let shell = Shell {
+            program: "/nonexistent/hoo24-layout-fixture".into(),
+            args: vec![],
+            directory: None,
+        };
+        for index in 0..12 {
+            let id = tabs.open(&shell, GridSize::new(80, 24)).unwrap();
+            tabs.get_mut(id).unwrap().identity.compact = index % 3 != 0;
+            if index < 3 {
+                tabs.set_pinned(id, true).unwrap();
+            }
+        }
+        let identities: Vec<_> = tabs
+            .items
+            .iter()
+            .map(|tab| (tab.id, tab.identity.clone(), tab.pinned))
+            .collect();
+        for width in [640.0, 1280.0] {
+            let mut state = State {
+                width,
+                ..Default::default()
+            };
+            let layout = state.layout(&tabs);
+            assert!(layout.overflow);
+            let normal_span = 12.0 * TAB_WIDTH + GROUP_GAP;
+            assert!(layout.max_offset + layout.viewport.width < normal_span);
+            assert_eq!(
+                layout.tab(3, 0.0).x - (layout.tab(2, 0.0).x + layout.tab(2, 0.0).width),
+                GROUP_GAP
+            );
+            for (index, tab) in tabs.items.iter().enumerate() {
+                state.reveal(&tabs, tab.id);
+                let rect = layout.tab(index, state.offset);
+                assert_eq!(
+                    rect.width,
+                    if tab.identity.compact {
+                        COMPACT_WIDTH
+                    } else {
+                        TAB_WIDTH
+                    }
+                );
+                assert!(
+                    rect.x >= layout.viewport.x
+                        && rect.x + rect.width <= layout.viewport.x + layout.viewport.width
+                );
+                assert_eq!(
+                    layout.hit(&tabs, state.offset, rect.center()),
+                    Some(Target::Tab(tab.id))
+                );
+                let close = Layout::close(rect);
+                assert!(rect.contains(close.center()));
+                assert_eq!(
+                    layout.hit(&tabs, state.offset, close.center()),
+                    Some(Target::Close(tab.id))
+                );
+                assert!(!close.contains(Point::new(rect.x + 36.0, 20.0))); // Symbol stays a distinct activation target.
+                state.focused = Some(Target::Tab(tab.id));
+                state.traverse(&tabs, false);
+                assert_eq!(state.focused, Some(Target::Close(tab.id)));
+            }
+            state.scroll(&tabs, f32::MAX);
+            assert_eq!(state.offset, layout.max_offset);
+            assert_eq!(
+                layout.hit(&tabs, state.offset, layout.plus.center()),
+                Some(Target::Plus)
+            );
+        }
+        assert_eq!(
+            tabs.items
+                .iter()
+                .map(|tab| (tab.id, tab.identity.clone(), tab.pinned))
+                .collect::<Vec<_>>(),
+            identities
+        );
+        // A deliberate width change before an overflowed target requires fresh
+        // geometry. Reveal and hit testing still agree after that change.
+        let target = tabs.items[11].id;
+        tabs.items[0].identity.compact = true;
+        let mut state = State {
+            width: 640.0,
+            ..Default::default()
+        };
+        state.reveal(&tabs, target);
+        let layout = state.layout(&tabs);
+        assert_eq!(
+            layout.hit(&tabs, state.offset, layout.tab(11, state.offset).center()),
+            Some(Target::Tab(target))
+        );
     }
 }
