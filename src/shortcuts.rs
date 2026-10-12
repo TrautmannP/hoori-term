@@ -1,6 +1,7 @@
 //! Logical, window-local shortcuts. Built-in dispatch and conflict checks use
 //! the same table; direct tab bindings are stored on the stable tab identity.
 use iced::keyboard::{Key, Modifiers, key::Named};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -11,6 +12,8 @@ pub enum Action {
     CloseTab,
     EditTab,
     FocusTabs,
+    Templates,
+    SaveTemplate,
     Copy,
     Paste,
     HistoryTop,
@@ -29,6 +32,8 @@ impl Action {
             Self::CloseTab => "Tab schließen",
             Self::EditTab => "Tab bearbeiten",
             Self::FocusTabs => "Tableiste fokussieren",
+            Self::Templates => "Vorlagen anzeigen",
+            Self::SaveTemplate => "Als Vorlage speichern",
             Self::Copy => "Kopieren",
             Self::Paste => "Einfügen",
             Self::HistoryTop => "Verlaufsanfang",
@@ -54,6 +59,8 @@ pub fn builtin(key: &Key, modifiers: Modifiers) -> Option<Action> {
                 "w" => Some(Action::CloseTab),
                 "e" => Some(Action::EditTab),
                 "l" => Some(Action::FocusTabs),
+                "p" => Some(Action::Templates),
+                "s" => Some(Action::SaveTemplate),
                 "c" => Some(Action::Copy),
                 "v" => Some(Action::Paste),
                 _ => None,
@@ -71,10 +78,90 @@ pub fn builtin(key: &Key, modifiers: Modifiers) -> Option<Action> {
     None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredShortcut", into = "StoredShortcut")]
 pub struct Shortcut {
     key: Key,
     modifiers: Modifiers,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredShortcut {
+    key: String,
+    modifiers: u8,
+}
+
+impl From<Shortcut> for StoredShortcut {
+    fn from(value: Shortcut) -> Self {
+        Self {
+            key: match value.key.as_ref() {
+                Key::Character(c) => c.into(),
+                Key::Named(named) => format!("{named:?}"),
+                Key::Unidentified => unreachable!(),
+            },
+            modifiers: u8::from(value.modifiers.control())
+                | (u8::from(value.modifiers.alt()) << 1)
+                | (u8::from(value.modifiers.shift()) << 2)
+                | (u8::from(value.modifiers.logo()) << 3),
+        }
+    }
+}
+
+impl TryFrom<StoredShortcut> for Shortcut {
+    type Error = String;
+
+    fn try_from(value: StoredShortcut) -> Result<Self, Self::Error> {
+        let key = if value.key.chars().count() == 1 {
+            Key::Character(value.key.into())
+        } else {
+            Key::Named(match value.key.as_str() {
+                "Space" => Named::Space,
+                "Tab" => Named::Tab,
+                "Enter" => Named::Enter,
+                "Escape" => Named::Escape,
+                "Backspace" => Named::Backspace,
+                "Delete" => Named::Delete,
+                "Insert" => Named::Insert,
+                "Home" => Named::Home,
+                "End" => Named::End,
+                "PageUp" => Named::PageUp,
+                "PageDown" => Named::PageDown,
+                "ArrowUp" => Named::ArrowUp,
+                "ArrowDown" => Named::ArrowDown,
+                "ArrowLeft" => Named::ArrowLeft,
+                "ArrowRight" => Named::ArrowRight,
+                "F1" => Named::F1,
+                "F2" => Named::F2,
+                "F3" => Named::F3,
+                "F4" => Named::F4,
+                "F5" => Named::F5,
+                "F6" => Named::F6,
+                "F7" => Named::F7,
+                "F8" => Named::F8,
+                "F9" => Named::F9,
+                "F10" => Named::F10,
+                "F11" => Named::F11,
+                "F12" => Named::F12,
+                _ => return Err("Unbekannte Shortcut-Taste".into()),
+            })
+        };
+        if value.modifiers > 15 {
+            return Err("Ungültige Shortcut-Modifikatoren".into());
+        }
+        let mut modifiers = Modifiers::empty();
+        for (bit, modifier) in [
+            (1, Modifiers::CTRL),
+            (2, Modifiers::ALT),
+            (4, Modifiers::SHIFT),
+            (8, Modifiers::LOGO),
+        ] {
+            if value.modifiers & bit != 0 {
+                modifiers |= modifier;
+            }
+        }
+        Self::capture(&key, modifiers)?.ok_or_else(|| "Ungültiger Shortcut".into())
+    }
 }
 
 impl Shortcut {
@@ -156,7 +243,8 @@ fn normalize(key: &Key) -> Option<Key> {
     match key {
         Key::Character(c) if c.as_str() == " " => Some(Key::Named(Named::Space)),
         Key::Character(c) if c.chars().count() == 1 && !c.chars().any(char::is_control) => {
-            Some(Key::Character(c.to_lowercase().into()))
+            let normalized = c.to_lowercase();
+            (normalized.chars().count() == 1).then(|| Key::Character(normalized.into()))
         }
         Key::Named(
             Named::Space

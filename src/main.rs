@@ -6,9 +6,14 @@ use hoori_term::input;
 use hoori_term::notifications::Notifications;
 use hoori_term::session::ProcessState;
 use hoori_term::shortcuts::{self, Action, Shortcut};
+use hoori_term::templates::{
+    Catalog, Loaded, Saved, Template, TemplateFile, TemplateId, TemplateShell,
+};
 use hoori_term::terminal::GridSize;
 use iced::futures::StreamExt;
-use iced::widget::{button, canvas, column, container, operation, row, space, text, text_input};
+use iced::widget::{
+    button, canvas, column, container, operation, row, scrollable, space, text, text_input,
+};
 use iced::{Element, Event, Fill, Subscription, Task, Theme, keyboard, window};
 
 #[derive(Clone)]
@@ -57,7 +62,7 @@ fn main() -> iced::Result {
             std::process::exit(2);
         }
     };
-    iced::application(move || App::new(options.clone()), App::update, App::view)
+    iced::application(move || App::boot(options.clone()), App::update, App::view)
         .title(App::title)
         .subscription(App::subscription)
         .theme(Theme::TokyoNight)
@@ -102,17 +107,59 @@ enum Message {
     CancelClose,
     ConfirmClose,
     ShutdownComplete,
+    ShowTemplates,
+    HideTemplates,
+    SaveTemplate(TabId),
+    OpenTemplate(TemplateId),
+    EditTemplate(TemplateId),
+    RemoveTemplate(TemplateId),
+    EditShell(TemplateShell),
+    EditDirectory(String),
+    Loaded(Result<Loaded, String>),
+    Saved(u64, Result<Saved, String>),
+    RetryLoad,
+    RetrySave,
+    DiscardAndExit,
 }
 
 use hoori_term::tabs::{Accent, CloseTarget, Shell, TabId, Tabs};
 
+#[derive(Clone, Copy)]
+enum EditorTarget {
+    Tab(TabId),
+    Save(TabId),
+    Template(TemplateId),
+}
+
 struct TabEditor {
-    id: TabId,
+    target: EditorTarget,
     name: String,
     accent: Accent,
     shortcut: Option<Shortcut>,
     recording: bool,
     error: Option<String>,
+    shell: TemplateShell,
+    directory: String,
+}
+
+impl TabEditor {
+    fn template(&self) -> Result<Template, String> {
+        let name = hoori_term::tabs::validated_name(&self.name)?
+            .ok_or("Eine Vorlage braucht einen Namen")?;
+        Ok(Template {
+            id: match self.target {
+                EditorTarget::Template(id) => id,
+                _ => TemplateId(0),
+            },
+            identity: hoori_term::tabs::Identity {
+                name: Some(name),
+                accent: self.accent,
+                shortcut: self.shortcut.clone(),
+            },
+            shell: self.shell,
+            directory: self.directory.clone(),
+        })
+    }
 }
 
 struct App {
@@ -125,6 +172,17 @@ struct App {
     pending_shutdowns: usize,
     strip: tab_strip::State,
     launching: Option<usize>,
+    catalog: Catalog,
+    template_file: Option<TemplateFile>,
+    template_stamp: Option<Vec<u8>>,
+    templates_loaded: bool,
+    templates_loading: bool,
+    storage_error: Option<String>,
+    revision: u64,
+    saved_revision: u64,
+    saving: Option<u64>,
+    templates_open: bool,
+    selected_template: Option<TemplateId>,
     cache: canvas::Cache,
 }
 
@@ -133,6 +191,7 @@ impl App {
         let default_shell = Shell {
             program: options.shell,
             args: options.args,
+            directory: None,
         };
         let mut tabs = Tabs::default();
         tabs.open(&default_shell, GridSize::new(98, 30)).unwrap();
@@ -146,8 +205,142 @@ impl App {
             pending_shutdowns: 0,
             strip: tab_strip::State::default(),
             launching: None,
+            catalog: Catalog::default(),
+            template_file: None,
+            template_stamp: None,
+            templates_loaded: true,
+            templates_loading: false,
+            storage_error: None,
+            revision: 0,
+            saved_revision: 0,
+            saving: None,
+            templates_open: false,
+            selected_template: None,
             cache: canvas::Cache::new(),
         }
+    }
+
+    fn boot(options: Options) -> (Self, Task<Message>) {
+        let mut app = Self::new(options);
+        let task = app.load_templates();
+        (app, task)
+    }
+
+    fn load_templates(&mut self) -> Task<Message> {
+        if self.templates_loading || self.revision != self.saved_revision {
+            return Task::none();
+        }
+        self.templates_loaded = false;
+        let file = match TemplateFile::configured() {
+            Ok(file) => file,
+            Err(error) => {
+                self.storage_error = Some(error);
+                return Task::none();
+            }
+        };
+        self.template_file = Some(file.clone());
+        self.templates_loading = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || file.load())
+                    .await
+                    .map_err(|_| "Laden der Vorlagen wurde unterbrochen".to_owned())
+                    .and_then(|r| r)
+            },
+            Message::Loaded,
+        )
+    }
+
+    fn persist_changed(&mut self) -> Task<Message> {
+        self.revision += 1;
+        self.persist()
+    }
+
+    fn persist(&mut self) -> Task<Message> {
+        if self.saving.is_some() || !self.templates_loaded || self.revision == self.saved_revision {
+            return Task::none();
+        }
+        let Some(file) = self.template_file.clone() else {
+            // Model-only App::new does not touch user configuration in tests.
+            self.saved_revision = self.revision;
+            return Task::none();
+        };
+        let revision = self.revision;
+        self.saving = Some(revision);
+        self.storage_error = None;
+        let catalog = self.catalog.clone();
+        let stamp = self.template_stamp.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || file.save(&catalog, stamp.as_deref()))
+                    .await
+                    .map_err(|_| "Speichern der Vorlagen wurde unterbrochen".to_owned())
+                    .and_then(|r| r)
+            },
+            move |result| Message::Saved(revision, result),
+        )
+    }
+
+    fn exit_when_ready(&self) -> Task<Message> {
+        if self.closing
+            && self.pending_shutdowns == 0
+            && self.saving.is_none()
+            && self.revision == self.saved_revision
+        {
+            iced::exit()
+        } else {
+            Task::none()
+        }
+    }
+
+    fn editor_conflict(&self, editor: &TabEditor, shortcut: &Shortcut) -> Result<(), String> {
+        let (template, tab) = match editor.target {
+            EditorTarget::Tab(id) => (self.tabs.get(id).and_then(|t| t.template), Some(id)),
+            EditorTarget::Save(id) => (None, Some(id)),
+            EditorTarget::Template(id) => (Some(id), None),
+        };
+        self.catalog
+            .check_shortcut(&self.tabs, template, tab, shortcut)
+    }
+
+    fn begin_tab_edit(&mut self, id: TabId, save: bool) -> Task<Message> {
+        if save && !self.templates_loaded {
+            self.error = Some("Vorlagen sind noch nicht verfügbar".into());
+            return Task::none();
+        }
+        let Some(tab) = self.tabs.get(id) else {
+            return Task::none();
+        };
+        if save && let Some(template) = tab.template {
+            return self.update(Message::EditTemplate(template));
+        }
+        self.strip.focused = None;
+        self.templates_open = false;
+        self.editing = Some(TabEditor {
+            target: if save {
+                EditorTarget::Save(id)
+            } else {
+                EditorTarget::Tab(id)
+            },
+            name: if save {
+                tab.label().to_owned()
+            } else {
+                tab.identity.name.clone().unwrap_or_default()
+            },
+            accent: tab.identity.accent,
+            shortcut: tab.identity.shortcut.clone(),
+            recording: false,
+            error: None,
+            shell: TemplateShell::for_shell(&tab.shell),
+            directory: tab
+                .shell
+                .directory
+                .clone()
+                .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+                .and_then(|p| p.into_os_string().into_string().ok())
+                .unwrap_or_default(),
+        });
+        operation::focus("tab-name")
     }
 
     fn title(&self) -> String {
@@ -161,8 +354,17 @@ impl App {
         };
         build_info::title(&if self.confirming.is_some() {
             format!("Schließen bestätigen — {title}")
-        } else if self.editing.is_some() {
-            format!("Tab bearbeiten — {title}")
+        } else if let Some(editor) = &self.editing {
+            format!(
+                "{} — {title}",
+                match editor.target {
+                    EditorTarget::Tab(_) => "Tab bearbeiten",
+                    EditorTarget::Save(_) => "Als Vorlage speichern",
+                    EditorTarget::Template(_) => "Vorlage bearbeiten",
+                }
+            )
+        } else if self.templates_open {
+            format!("Vorlagen — {title}")
         } else if self.launching.is_some() {
             format!("Neue Sitzung — {title}")
         } else {
@@ -198,6 +400,7 @@ impl App {
             return Task::none();
         }
         self.editing = None;
+        self.templates_open = false;
         self.launching = None;
         self.strip.focused = None;
         if self.tabs.running_names(target).is_empty() {
@@ -215,11 +418,7 @@ impl App {
         self.closing = self.tabs.items.is_empty();
         self.reveal_active();
         if sessions.is_empty() {
-            return if self.closing && self.pending_shutdowns == 0 {
-                iced::exit()
-            } else {
-                Task::none()
-            };
+            return self.exit_when_ready();
         }
         self.pending_shutdowns += 1;
         Task::perform(
@@ -273,17 +472,18 @@ impl App {
                 _ => Task::none(),
             };
         }
-        if let Some(editor) = &mut self.editing {
+        if let Some(mut editor) = self.editing.take() {
             if key == Key::Named(Named::Escape) && modifiers.is_empty() {
                 if editor.recording {
                     editor.recording = false;
                     editor.error = None;
                 } else {
+                    self.editing = Some(editor);
                     return self.update(Message::CancelEdit);
                 }
             } else if editor.recording {
                 match Shortcut::capture(&key, modifiers) {
-                    Ok(Some(shortcut)) => match self.tabs.check_shortcut(editor.id, &shortcut) {
+                    Ok(Some(shortcut)) => match self.editor_conflict(&editor, &shortcut) {
                         Ok(()) => {
                             editor.shortcut = Some(shortcut);
                             editor.recording = false;
@@ -295,19 +495,75 @@ impl App {
                     Err(error) => editor.error = Some(error),
                 }
             } else if key == Key::Named(Named::Enter) {
+                self.editing = Some(editor);
                 return self.update(Message::ApplyEdit);
             } else if key == Key::Named(Named::Tab) {
+                self.editing = Some(editor);
                 return if modifiers.shift() {
                     operation::focus_previous()
                 } else {
                     operation::focus_next()
                 };
             }
+            self.editing = Some(editor);
             // All other dialog text belongs to widgets, even when unhandled.
             return Task::none();
         }
+        if self.templates_open {
+            let index = self
+                .catalog
+                .items
+                .iter()
+                .position(|t| Some(t.id) == self.selected_template)
+                .unwrap_or(0);
+            let selected = self.catalog.items.get(index).map(|t| t.id);
+            return match key {
+                Key::Named(Named::Escape) => self.update(Message::HideTemplates),
+                Key::Named(Named::ArrowUp | Named::ArrowDown | Named::Home | Named::End) => {
+                    let last = self.catalog.items.len().saturating_sub(1);
+                    let next = match key {
+                        Key::Named(Named::ArrowUp) => index.saturating_sub(1),
+                        Key::Named(Named::ArrowDown) => (index + 1).min(last),
+                        Key::Named(Named::Home) => 0,
+                        _ => last,
+                    };
+                    self.selected_template = self.catalog.items.get(next).map(|t| t.id);
+                    operation::snap_to(
+                        "template-list",
+                        operation::RelativeOffset {
+                            x: 0.0,
+                            y: if last > 0 {
+                                next as f32 / last as f32
+                            } else {
+                                0.0
+                            },
+                        },
+                    )
+                }
+                Key::Named(Named::Enter) => selected
+                    .map(|id| self.update(Message::OpenTemplate(id)))
+                    .unwrap_or_else(Task::none),
+                Key::Named(Named::Delete) => selected
+                    .map(|id| self.update(Message::RemoveTemplate(id)))
+                    .unwrap_or_else(Task::none),
+                Key::Character(c) if c.eq_ignore_ascii_case("e") => selected
+                    .map(|id| self.update(Message::EditTemplate(id)))
+                    .unwrap_or_else(Task::none),
+                Key::Named(Named::Tab) => {
+                    if modifiers.shift() {
+                        operation::focus_previous()
+                    } else {
+                        operation::focus_next()
+                    }
+                }
+                _ => Task::none(),
+            };
+        }
         if let Some(action) = shortcuts::builtin(&key, modifiers) {
             return self.action(action);
+        }
+        if let Some(id) = self.catalog.shortcut_target(&key, modifiers) {
+            return self.update(Message::OpenTemplate(id));
         }
         if let Some(id) = self.tabs.shortcut_target(&key, modifiers) {
             self.strip.focused = None;
@@ -330,6 +586,12 @@ impl App {
 
     fn action(&mut self, action: Action) -> Task<Message> {
         match action {
+            Action::Templates => return self.update(Message::ShowTemplates),
+            Action::SaveTemplate => {
+                if let Some(id) = self.tabs.active {
+                    return self.update(Message::SaveTemplate(id));
+                }
+            }
             Action::NewTab => return self.update(Message::Open(self.default_shell.clone())),
             Action::NewBash => return self.update(Message::Open(Shell::bash())),
             Action::NextTab | Action::PreviousTab => {
@@ -378,6 +640,30 @@ impl App {
         if let Some(id) = self.tabs.active {
             self.strip.reveal(&self.tabs, id);
         }
+    }
+
+    fn reveal_template_selection(&self) -> Task<Message> {
+        if !self.templates_open {
+            return Task::none();
+        }
+        let index = self
+            .catalog
+            .items
+            .iter()
+            .position(|t| Some(t.id) == self.selected_template)
+            .unwrap_or(0);
+        let last = self.catalog.items.len().saturating_sub(1);
+        operation::snap_to(
+            "template-list",
+            operation::RelativeOffset {
+                x: 0.0,
+                y: if last > 0 {
+                    index as f32 / last as f32
+                } else {
+                    0.0
+                },
+            },
+        )
     }
 
     fn strip_keyboard(
@@ -429,9 +715,18 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let storage_message = matches!(
+            &message,
+            Message::Loaded(_)
+                | Message::Saved(..)
+                | Message::RetryLoad
+                | Message::RetrySave
+                | Message::DiscardAndExit
+        );
         // Dialogs freeze commands and selection, but transport/status updates
         // continue for every tab. No queued paste can bypass a close dialog.
-        if (self.confirming.is_some() || self.closing)
+        if !storage_message
+            && (self.confirming.is_some() || self.closing)
             && !matches!(
                 message,
                 Message::Tick(_)
@@ -445,7 +740,8 @@ impl App {
         {
             return Task::none();
         }
-        if self.editing.is_some()
+        if !storage_message
+            && self.editing.is_some()
             && !matches!(
                 message,
                 Message::Tick(_)
@@ -454,6 +750,8 @@ impl App {
                     | Message::Event(..)
                     | Message::EditName(_)
                     | Message::EditAccent(_)
+                    | Message::EditShell(_)
+                    | Message::EditDirectory(_)
                     | Message::CaptureShortcut
                     | Message::ClearShortcut
                     | Message::ApplyEdit
@@ -463,7 +761,8 @@ impl App {
         {
             return Task::none();
         }
-        if self.launching.is_some()
+        if !storage_message
+            && self.launching.is_some()
             && !matches!(
                 message,
                 Message::Tick(_)
@@ -472,6 +771,23 @@ impl App {
                     | Message::Event(..)
                     | Message::ChooseShell(_)
                     | Message::CancelLaunch
+                    | Message::ShutdownComplete
+            )
+        {
+            return Task::none();
+        }
+        if !storage_message
+            && self.templates_open
+            && !matches!(
+                message,
+                Message::Tick(_)
+                    | Message::Resize(..)
+                    | Message::StripWidth(_)
+                    | Message::Event(..)
+                    | Message::HideTemplates
+                    | Message::OpenTemplate(_)
+                    | Message::EditTemplate(_)
+                    | Message::RemoveTemplate(_)
                     | Message::ShutdownComplete
             )
         {
@@ -557,6 +873,7 @@ impl App {
                 }),
                 status,
             ) if self.editing.is_some()
+                || self.templates_open
                 || self.launching.is_some()
                 || status == iced::event::Status::Ignored =>
             {
@@ -627,18 +944,20 @@ impl App {
                     }
                 }
             }
-            Message::Edit(id) => {
-                self.strip.focused = None;
-                if let Some(tab) = self.tabs.get(id) {
-                    self.editing = Some(TabEditor {
-                        id,
-                        name: tab.identity.name.clone().unwrap_or_default(),
-                        accent: tab.identity.accent,
-                        shortcut: tab.identity.shortcut.clone(),
-                        recording: false,
-                        error: None,
-                    });
-                    return operation::focus("tab-name");
+            Message::Edit(id) => return self.begin_tab_edit(id, false),
+            Message::SaveTemplate(id) => return self.begin_tab_edit(id, true),
+            Message::EditShell(shell) => {
+                if let Some(editor) = &mut self.editing {
+                    editor.shell = shell;
+                    editor.error = None;
+                }
+            }
+            Message::EditDirectory(directory) => {
+                if let Some(editor) = &mut self.editing
+                    && !editor.recording
+                {
+                    editor.directory = directory;
+                    editor.error = None;
                 }
             }
             Message::EditName(name) => {
@@ -672,21 +991,54 @@ impl App {
                 if let Some(editor) = &self.editing
                     && !editor.recording
                 {
-                    match self.tabs.configure(
-                        editor.id,
-                        &editor.name,
-                        editor.accent,
-                        editor.shortcut.clone(),
-                    ) {
-                        Ok(()) => {
+                    let result = match editor.target {
+                        EditorTarget::Tab(id) => self.catalog.configure_tab(
+                            &mut self.tabs,
+                            id,
+                            &editor.name,
+                            editor.accent,
+                            editor.shortcut.clone(),
+                        ),
+                        target => {
+                            if !self.templates_loaded {
+                                Err("Vorlagen sind nicht verfügbar".into())
+                            } else {
+                                editor.template().and_then(|draft| match target {
+                                    EditorTarget::Save(tab) => self
+                                        .catalog
+                                        .save_tab(&mut self.tabs, tab, draft)
+                                        .map(|_| true),
+                                    EditorTarget::Template(_) => {
+                                        self.catalog.edit(&mut self.tabs, draft).map(|_| true)
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            }
+                        }
+                    };
+                    match result {
+                        Ok(changed) => {
+                            self.templates_open =
+                                matches!(editor.target, EditorTarget::Template(_));
                             self.editing = None;
                             self.cache.clear();
+                            if changed {
+                                let persist = self.persist_changed();
+                                return Task::batch([persist, self.reveal_template_selection()]);
+                            }
                         }
                         Err(error) => self.editing.as_mut().unwrap().error = Some(error),
                     }
                 }
             }
-            Message::CancelEdit => self.editing = None,
+            Message::CancelEdit => {
+                self.templates_open = self
+                    .editing
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.target, EditorTarget::Template(_)));
+                self.editing = None;
+                return self.reveal_template_selection();
+            }
             Message::CancelClose => self.confirming = None,
             Message::ConfirmClose => {
                 if let Some(target) = self.confirming {
@@ -695,9 +1047,123 @@ impl App {
             }
             Message::ShutdownComplete => {
                 self.pending_shutdowns = self.pending_shutdowns.saturating_sub(1);
-                if self.closing && self.pending_shutdowns == 0 {
-                    return iced::exit();
+                return self.exit_when_ready();
+            }
+            Message::ShowTemplates => {
+                self.templates_open = true;
+                self.strip.focused = None;
+                if !self
+                    .selected_template
+                    .is_some_and(|id| self.catalog.get(id).is_some())
+                {
+                    self.selected_template = self.catalog.items.first().map(|t| t.id);
                 }
+                return self.reveal_template_selection();
+            }
+            Message::HideTemplates => self.templates_open = false,
+            Message::OpenTemplate(id) => {
+                if self.templates_loaded {
+                    let size = self
+                        .tabs
+                        .current()
+                        .map(|t| t.terminal.size)
+                        .unwrap_or(GridSize::new(98, 30));
+                    self.error = self.catalog.open(&mut self.tabs, id, size).err();
+                    if self.error.is_none() {
+                        self.templates_open = false;
+                        self.strip.focused = None;
+                        self.cache.clear();
+                        self.reveal_active();
+                    }
+                }
+            }
+            Message::EditTemplate(id) => {
+                if self.templates_loaded
+                    && let Some(template) = self.catalog.get(id)
+                {
+                    self.selected_template = Some(id);
+                    self.templates_open = false;
+                    self.editing = Some(TabEditor {
+                        target: EditorTarget::Template(id),
+                        name: template.name().into(),
+                        accent: template.identity.accent,
+                        shortcut: template.identity.shortcut.clone(),
+                        recording: false,
+                        error: None,
+                        shell: template.shell,
+                        directory: template.directory.clone(),
+                    });
+                    return operation::focus("tab-name");
+                }
+            }
+            Message::RemoveTemplate(id) => {
+                if self.templates_loaded {
+                    self.error = self.catalog.remove(&mut self.tabs, id).err();
+                    if self.error.is_none() {
+                        self.selected_template = self.catalog.items.first().map(|t| t.id);
+                        let persist = self.persist_changed();
+                        return Task::batch([persist, self.reveal_template_selection()]);
+                    }
+                }
+            }
+            Message::Loaded(result) => {
+                if self.templates_loading {
+                    self.templates_loading = false;
+                    match result {
+                        Ok(loaded) => {
+                            // Ordinary tabs can be edited while a slow initial
+                            // read is pending. Loading must not steal a binding.
+                            if let Some(error) = loaded.catalog.items.iter().find_map(|template| {
+                                template.identity.shortcut.as_ref().and_then(|shortcut| {
+                                    loaded
+                                        .catalog
+                                        .check_shortcut(
+                                            &self.tabs,
+                                            Some(template.id),
+                                            None,
+                                            shortcut,
+                                        )
+                                        .err()
+                                })
+                            }) {
+                                self.storage_error =
+                                    Some(format!("Vorlagenkonflikt beim Laden: {error}"));
+                                return Task::none();
+                            }
+                            self.catalog = loaded.catalog;
+                            self.template_stamp = loaded.stamp;
+                            self.templates_loaded = true;
+                            self.storage_error = None;
+                        }
+                        Err(error) => self.storage_error = Some(error),
+                    }
+                }
+            }
+            Message::Saved(revision, result) => {
+                if self.saving == Some(revision) {
+                    self.saving = None;
+                    match result {
+                        Ok(saved) => {
+                            self.template_stamp = Some(saved.stamp);
+                            self.storage_error = saved.warning;
+                            if self.storage_error.is_none() {
+                                self.saved_revision = revision;
+                                if self.revision != revision {
+                                    return self.persist();
+                                }
+                            }
+                        }
+                        Err(error) => self.storage_error = Some(error),
+                    }
+                    return self.exit_when_ready();
+                }
+            }
+            Message::RetryLoad => return self.load_templates(),
+            Message::RetrySave => return self.persist(),
+            Message::DiscardAndExit
+                if self.closing && self.pending_shutdowns == 0 && self.saving.is_none() =>
+            {
+                return iced::exit();
             }
             _ => {}
         }
@@ -709,6 +1175,7 @@ impl App {
         let interactive = self.confirming.is_none()
             && self.editing.is_none()
             && self.launching.is_none()
+            && !self.templates_open
             && !self.closing;
         let header = canvas(tab_strip::TabStrip {
             tabs: &self.tabs,
@@ -742,6 +1209,66 @@ impl App {
             header.into()
         };
         let mut content = column![header];
+        let storage_status = if self.templates_loading {
+            "Vorlagen werden geladen …"
+        } else if !self.templates_loaded {
+            "Vorlagen nicht geladen · Datei bleibt erhalten"
+        } else if self.saving.is_some() {
+            "Vorlagen werden gespeichert …"
+        } else if self.revision != self.saved_revision {
+            "Vorlagenänderungen NICHT gespeichert"
+        } else {
+            "Vorlagen bereit · kein automatischer Start"
+        };
+        let template_toolbar = container(
+            row![
+                button(text("Vorlagen · Strg+Umschalt+P").size(12))
+                    .on_press_maybe(interactive.then_some(Message::ShowTemplates)),
+                button(
+                    text(
+                        if self.tabs.current().is_some_and(|t| t.template.is_some()) {
+                            "Vorlage bearbeiten"
+                        } else {
+                            "Als Vorlage speichern"
+                        }
+                    )
+                    .size(12)
+                )
+                .on_press_maybe(
+                    (interactive && self.templates_loaded)
+                        .then(|| self.tabs.active.map(Message::SaveTemplate))
+                        .flatten()
+                ),
+                text(storage_status).size(12).width(Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .padding([4, 8]);
+        if let Some(error) = &self.storage_error {
+            content = content.push(
+                container(
+                    column![
+                        text(error)
+                            .size(12)
+                            .color(iced::Color::from_rgb8(255, 125, 145)),
+                        if self.templates_loaded {
+                            button("Erneut speichern")
+                                .on_press_maybe(self.saving.is_none().then_some(Message::RetrySave))
+                        } else {
+                            button("Erneut laden").on_press_maybe(
+                                (!self.templates_loading).then_some(Message::RetryLoad),
+                            )
+                        },
+                    ]
+                    .spacing(4),
+                )
+                .padding(8),
+            );
+        }
+        if self.templates_open {
+            content = content.push(self.templates_view());
+        }
         if let Some(selected) = self.launching {
             let choice = |label: &'static str, index: usize, message: Message| {
                 button(label).on_press(message).style(move |theme, status| {
@@ -811,6 +1338,7 @@ impl App {
             if let Some(error) = tab.error.as_ref().or(self.error.as_ref()) {
                 content = content.push(container(text(error).size(14)).padding(8));
             }
+            content = content.push(template_toolbar);
             let status = match tab.state() {
                 ProcessState::Running => "läuft".into(),
                 ProcessState::Exited(code) => format!("beendet · Exit {code}"),
@@ -844,13 +1372,90 @@ impl App {
                 .height(48),
             );
         } else {
+            content = content.push(template_toolbar);
             content = content.push(
-                container(text("Sitzungen werden beendet …"))
-                    .padding(16)
-                    .height(Fill),
+                container(
+                    column![
+                        text(if self.saving.is_some() {
+                            "Vorlagen werden vor dem Beenden gespeichert …"
+                        } else if self.revision != self.saved_revision {
+                            "Sitzungen beendet. Vorlagenänderungen sind NICHT gespeichert."
+                        } else {
+                            "Sitzungen werden beendet …"
+                        }),
+                        button("Ungespeichert beenden").on_press_maybe(
+                            (self.closing
+                                && self.pending_shutdowns == 0
+                                && self.saving.is_none()
+                                && self.revision != self.saved_revision)
+                                .then_some(Message::DiscardAndExit)
+                        )
+                    ]
+                    .spacing(12),
+                )
+                .padding(16)
+                .height(Fill),
             );
         }
         container(content).width(Fill).height(Fill).into()
+    }
+
+    fn templates_view(&self) -> Element<'_, Message> {
+        let mut entries = column![].spacing(6);
+        for template in &self.catalog.items {
+            let id = template.id;
+            let link = self.tabs.items.iter().find(|t| t.template == Some(id));
+            let state = match link.map(|t| t.state()) {
+                Some(ProcessState::Running) => "geöffnet",
+                Some(_) => "geöffnet · beendet/Fehler",
+                None => "geschlossen",
+            };
+            let shortcut = template
+                .identity
+                .shortcut
+                .as_ref()
+                .map(Shortcut::label)
+                .unwrap_or_else(|| "kein Shortcut".into());
+            let directory: String = template.directory.chars().take(90).collect();
+            entries = entries.push(
+                container(
+                    column![
+                        row![
+                            button(text(template.name()).size(14))
+                                .on_press(Message::OpenTemplate(id))
+                                .width(Fill)
+                                .style(move |theme, status| accent_style(
+                                    theme,
+                                    status,
+                                    template.identity.accent,
+                                    Some(id) == self.selected_template
+                                )),
+                            button("Bearbeiten").on_press(Message::EditTemplate(id)),
+                            button("Entfernen").on_press(Message::RemoveTemplate(id))
+                        ]
+                        .spacing(8),
+                        text(format!(
+                            "{} · {shortcut} · {state} · {directory}",
+                            template.shell.label()
+                        ))
+                        .size(12),
+                    ]
+                    .spacing(3),
+                )
+                .padding(4),
+            );
+        }
+        if self.catalog.items.is_empty() {
+            entries = entries.push(
+                text("Noch keine Vorlagen. Einen Tab bewusst als Vorlage speichern.").size(14),
+            );
+        }
+        container(column![
+            row![text("Gespeicherte Vorlagen").size(18).width(Fill),button("Zurück").on_press(Message::HideTemplates)].spacing(8),
+            text("Pfeile wählen · Enter öffnen/aktivieren · E bearbeiten · Entf entfernen · Esc zurück").size(12),
+            text("Entfernen löst die Verknüpfung und den Shortcut; ein laufender Tab bleibt erhalten.").size(12),
+                scrollable(entries).id("template-list").height(240),
+        ].spacing(8)).padding(12).style(container::rounded_box).into()
     }
 
     fn editor_view<'a>(&'a self, editor: &'a TabEditor) -> Element<'a, Message> {
@@ -883,13 +1488,18 @@ impl App {
             .size(16)
             .padding(8);
         let mut fields = column![
-            text(format!("Tab bearbeiten · Sitzung {}", editor.id.0)).size(18),
+            text(match editor.target {
+                EditorTarget::Tab(id) => format!("Tab bearbeiten · Sitzung {}", id.0),
+                EditorTarget::Save(id) => format!("Als Vorlage speichern · Sitzung {}", id.0),
+                EditorTarget::Template(id) => format!("Vorlage bearbeiten · Vorlage {}", id.0),
+            }).size(18),
             row![text("Name").size(14).width(70), name_input]
                 .spacing(6)
                 .align_y(iced::Center),
             text(format!(
-                "Bis zu {} Zeichen. Änderungen gelten für diesen geöffneten Tab.",
+                "Bis zu {} Zeichen. {}",
                 hoori_term::tabs::MAX_NAME_CHARS
+                ,if matches!(editor.target,EditorTarget::Tab(id) if self.tabs.get(id).is_some_and(|t|t.template.is_some())) { "Benutzeränderungen werden automatisch in der verknüpften Vorlage gespeichert." } else if matches!(editor.target,EditorTarget::Tab(_)) { "Vorübergehender Tab; Änderungen werden nicht gespeichert." } else { "Vorlage wird lokal gespeichert. Kein zusätzlicher Prozessstart beim Speichern." }
             ))
             .size(12),
             colors,
@@ -911,6 +1521,15 @@ impl App {
             text(helper).size(12),
         ]
         .spacing(10);
+        if !matches!(editor.target, EditorTarget::Tab(_)) {
+            fields = fields.push(row![
+                text("Startziel").size(14).width(70),
+                button("zsh").on_press(Message::EditShell(TemplateShell::Zsh)).style(if editor.shell==TemplateShell::Zsh { button::primary } else { button::secondary }),
+                button("Bash").on_press(Message::EditShell(TemplateShell::Bash)).style(if editor.shell==TemplateShell::Bash { button::primary } else { button::secondary }),
+            ].spacing(8).align_y(iced::Center))
+            .push(row![text("Verzeichnis").size(14).width(90),text_input("Absolutes Startverzeichnis",&editor.directory).id("template-directory").on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String)->Message)).size(14).padding(8)].spacing(8).align_y(iced::Center))
+            .push(text("Startziel und Verzeichnis gelten beim nächsten neuen Prozess. Offene Tabs werden nicht neu gestartet.").size(12));
+        }
         if let Some(error) = &editor.error {
             fields = fields.push(
                 text(error)
@@ -1213,6 +1832,19 @@ mod tests {
                 .iter()
                 .all(|t| t.terminal.shell_title == "ready")
         });
+        let identity = app.tabs.get(first).unwrap().identity.clone();
+        app.catalog
+            .save_tab(
+                &mut app.tabs,
+                first,
+                Template {
+                    id: TemplateId(0),
+                    identity,
+                    shell: TemplateShell::Bash,
+                    directory: "/tmp".into(),
+                },
+            )
+            .unwrap();
         let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
         assert_eq!(app.tabs.active, Some(first));
         // Real raw-mode readers make extra bytes observable. Focus movement
@@ -1240,6 +1872,18 @@ mod tests {
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
         assert!(app.launching.is_none());
         assert_eq!(app.tabs.items.len(), 2);
+        // Template navigation and dialog input must not also reach the real
+        // raw reader, including a deferred clipboard result.
+        let _ = app.action(Action::Templates);
+        let _ = app.keyboard(Key::Character("x".into()), mods, Some("x".into()));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F9), mods, None);
+        let _ = app.update(Message::Pasted(first, Some("hidden template paste".into())));
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        assert_eq!(app.tabs.active, Some(first));
+        assert_eq!(app.tabs.items.len(), 2);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(!app.templates_open);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
         let _ = app.keyboard(Key::Character("q".into()), mods, Some("q".into()));
         wait(&mut app, |a| {
             a.tabs.get(first).unwrap().terminal.shell_title == "data-71"
@@ -1306,6 +1950,130 @@ mod tests {
         });
         assert_eq!(app.tabs.get(first).unwrap().terminal.shell_title, "data-71");
         assert_eq!(app.tabs.items.len(), 2);
+    }
+
+    #[test]
+    fn loaded_templates_do_not_start_or_link_the_default_tab_and_load_errors_stay_visible() {
+        let mut source = app();
+        let id = source.tabs.active.unwrap();
+        source
+            .catalog
+            .save_tab(
+                &mut source.tabs,
+                id,
+                Template {
+                    id: TemplateId(0),
+                    identity: hoori_term::tabs::Identity {
+                        name: Some("Saved".into()),
+                        accent: Accent::Blue,
+                        shortcut: None,
+                    },
+                    shell: TemplateShell::Bash,
+                    directory: "/tmp".into(),
+                },
+            )
+            .unwrap();
+        let mut startup = app();
+        let default = startup.tabs.active;
+        startup.templates_loading = true;
+        startup.templates_loaded = false;
+        let _ = startup.update(Message::Loaded(Ok(Loaded {
+            catalog: source.catalog.clone(),
+            stamp: Some(source.catalog.to_bytes().unwrap()),
+        })));
+        assert!(startup.templates_loaded);
+        assert_eq!(startup.catalog.items.len(), 1);
+        let mut racing = app();
+        let ordinary = racing.tabs.active.unwrap();
+        let f8 =
+            Shortcut::capture(&Key::Named(keyboard::key::Named::F8), Modifiers::empty()).unwrap();
+        racing
+            .tabs
+            .configure(ordinary, "Edited during load", Accent::Green, f8.clone())
+            .unwrap();
+        let mut loaded = source.catalog.clone();
+        loaded.items[0].identity.shortcut = f8;
+        racing.templates_loading = true;
+        racing.templates_loaded = false;
+        let _ = racing.update(Message::Loaded(Ok(Loaded {
+            catalog: loaded,
+            stamp: None,
+        })));
+        assert!(!racing.templates_loaded);
+        assert!(
+            racing
+                .storage_error
+                .as_ref()
+                .unwrap()
+                .contains("Vorlagenkonflikt")
+        );
+        assert!(racing.catalog.items.is_empty());
+        assert_eq!(
+            racing
+                .tabs
+                .shortcut_target(&Key::Named(keyboard::key::Named::F8), Modifiers::empty()),
+            Some(ordinary)
+        );
+        assert_eq!(racing.tabs.items.len(), 1);
+        assert_eq!(startup.tabs.items.len(), 1);
+        assert_eq!(startup.tabs.active, default);
+        assert!(startup.tabs.current().unwrap().template.is_none());
+        startup.templates_loading = true;
+        startup.templates_loaded = false;
+        let _ = startup.update(Message::Loaded(Err("Corrupt file".into())));
+        assert_eq!(startup.storage_error.as_deref(), Some("Corrupt file"));
+        assert!(!startup.templates_loaded);
+        let _ = startup.update(Message::SaveTemplate(default.unwrap()));
+        assert!(startup.editing.is_none());
+        let _ = startup.update(Message::RemoveTemplate(source.catalog.items[0].id));
+        assert_eq!(startup.catalog.items.len(), 1);
+    }
+
+    #[test]
+    fn saves_coalesce_latest_revision_and_errors_do_not_claim_success_or_lose_pending_changes() {
+        let mut app = App::new(Options {
+            shell: "/nonexistent/template-state-model".into(),
+            args: vec![],
+        });
+        app.template_file = Some(TemplateFile {
+            path: "/nonexistent/model-only/templates.json".into(),
+        });
+        app.revision = 2;
+        app.saved_revision = 0;
+        app.saving = Some(1);
+        let _ = app.update(Message::Saved(
+            1,
+            Ok(Saved {
+                stamp: b"first".to_vec(),
+                warning: None,
+            }),
+        ));
+        assert_eq!(app.saved_revision, 1);
+        assert_eq!(app.saving, Some(2));
+        assert_eq!(app.template_stamp.as_deref(), Some(b"first".as_slice()));
+        let _ = app.update(Message::Saved(1, Err("stale callback".into())));
+        assert!(app.storage_error.is_none());
+        assert_eq!(app.saving, Some(2));
+        let _ = app.update(Message::Saved(2, Err("Disk write failed".into())));
+        assert_eq!(app.saved_revision, 1);
+        assert_eq!(app.revision, 2);
+        assert!(app.saving.is_none());
+        assert_eq!(app.storage_error.as_deref(), Some("Disk write failed"));
+        let _ = app.request_close(CloseTarget::Window);
+        assert!(app.closing); // Empty session set waits for pending configuration.
+        assert_ne!(app.revision, app.saved_revision);
+        let _ = app.update(Message::RetrySave);
+        assert_eq!(app.saving, Some(2));
+        let _ = app.update(Message::Saved(
+            2,
+            Ok(Saved {
+                stamp: b"latest".to_vec(),
+                warning: None,
+            }),
+        ));
+        assert_eq!(app.revision, app.saved_revision);
+        assert!(app.storage_error.is_none());
+        assert!(app.saving.is_none());
     }
 
     #[test]

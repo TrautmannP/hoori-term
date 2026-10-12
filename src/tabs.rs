@@ -1,13 +1,16 @@
 //! Stable session identity, terminal state and bounded output processing.
 use crate::session::{ProcessState, Session};
 use crate::shortcuts::Shortcut;
+use crate::templates::TemplateId;
 use crate::terminal::{GridSize, Terminal};
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub const MAX_TABS: usize = 16;
 pub const MAX_NAME_CHARS: usize = 40;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Accent {
     #[default]
     Default,
@@ -59,7 +62,8 @@ impl Accent {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Identity {
     pub name: Option<String>,
     pub accent: Accent,
@@ -73,6 +77,7 @@ pub struct TabId(pub u64);
 pub struct Shell {
     pub program: String,
     pub args: Vec<String>,
+    pub directory: Option<std::path::PathBuf>,
 }
 
 impl Shell {
@@ -80,12 +85,14 @@ impl Shell {
         Self {
             program: "/usr/bin/zsh".into(),
             args: vec!["-i".into()],
+            directory: None,
         }
     }
     pub fn bash() -> Self {
         Self {
             program: "/bin/bash".into(),
             args: vec!["-i".into()],
+            directory: None,
         }
     }
 }
@@ -94,6 +101,8 @@ pub struct Tab {
     pub id: TabId,
     default_label: String,
     pub identity: Identity,
+    pub template: Option<TemplateId>,
+    pub shell: Shell,
     pub terminal: Terminal,
     pub session: Option<Session>,
     pub error: Option<String>,
@@ -105,7 +114,13 @@ impl Tab {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        let (session, error) = match Session::spawn(&shell.program, &shell.args, size.pty()) {
+        let shell = shell.clone();
+        let (session, error) = match Session::spawn_in(
+            &shell.program,
+            &shell.args,
+            shell.directory.as_deref(),
+            size.pty(),
+        ) {
             Ok(session) => (Some(session), None),
             Err(error) => (
                 None,
@@ -116,6 +131,8 @@ impl Tab {
             id,
             default_label: format!("{name} · {}", id.0),
             identity: Identity::default(),
+            template: None,
+            shell,
             terminal: Terminal::new(size),
             session,
             error,
@@ -124,6 +141,10 @@ impl Tab {
 
     pub fn label(&self) -> &str {
         self.identity.name.as_deref().unwrap_or(&self.default_label)
+    }
+
+    pub fn original_label(&self) -> &str {
+        &self.default_label
     }
 
     /// Custom names need not be unique; always identify confirmation targets.
@@ -306,26 +327,12 @@ impl Tabs {
         if self.get(id).is_none() {
             return Err("Dieser Tab ist nicht mehr geöffnet".into());
         }
-        if name.chars().any(|c| {
-            c.is_control()
-                || matches!(
-                    c,
-                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-                )
-        }) {
-            return Err("Der Name darf keine Steuer- oder Richtungszeichen enthalten".into());
-        }
-        let name = name.trim();
-        if name.chars().count() > MAX_NAME_CHARS {
-            return Err(format!(
-                "Der Name darf höchstens {MAX_NAME_CHARS} Zeichen enthalten"
-            ));
-        }
+        let name = validated_name(name)?;
         if let Some(shortcut) = &shortcut {
             self.check_shortcut(id, shortcut)?;
         }
         self.get_mut(id).unwrap().identity = Identity {
-            name: (!name.is_empty()).then(|| name.to_owned()),
+            name,
             accent,
             shortcut,
         };
@@ -368,4 +375,23 @@ impl Tabs {
         }
         removed
     }
+}
+
+pub fn validated_name(name: &str) -> Result<Option<String>, String> {
+    if name.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        }) {
+            return Err("Der Name darf keine Steuer- oder Richtungszeichen enthalten".into());
+        }
+    let name = name.trim();
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!(
+            "Der Name darf höchstens {MAX_NAME_CHARS} Zeichen enthalten"
+        ));
+    }
+    Ok((!name.is_empty()).then(|| name.to_owned()))
 }

@@ -4,4 +4,5 @@ pub mod notifications;
 pub mod session;
 pub mod shortcuts;
 pub mod tabs;
+pub mod templates;
 pub mod terminal;

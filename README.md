@@ -4,6 +4,8 @@ A local native Rust terminal prototype for Ubuntu using iced/wgpu,
 alacritty_terminal and portable-pty. Multiple independent zsh/Bash tabs,
 selection, clipboard and bounded scrollback are available. Tabs can be named,
 colored and assigned their own direct shortcuts while their shells keep running.
+Explicit local templates preserve selected configurations for later, deliberate
+opening. They never resume processes or automatically open extra startup tabs.
 
 ## Run
 
@@ -30,6 +32,8 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Close active tab | Ctrl+Shift+W or its × button |
 | Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
+| Save active tab as a template / edit its linked template | Ctrl+Shift+S or **Als Vorlage speichern** / **Vorlage bearbeiten** |
+| List saved templates | Ctrl+Shift+P or **Vorlagen** |
 | Select / copy / paste | Drag left mouse / Ctrl+Shift+C / Ctrl+Shift+V |
 | Scroll history | Mouse wheel, Shift+PageUp / Shift+PageDown |
 | Oldest history / live output | Ctrl+Shift+Home / Ctrl+Shift+End or **↓ Live** |
@@ -62,13 +66,28 @@ With strip focus, arrows/Home/End move focus, Tab/Shift+Tab traverse tab/close/P
 targets, Enter/Space selects, Delete requests the focused tab's close, and Escape
 returns to terminal input. Focus movement alone preserves the active terminal.
 Direct shortcuts target the same open tab ID after
-renaming, color changes or removal of preceding tabs. A closed tab's binding
-is removed and never inherited by a new tab. Shortcuts activate existing tabs,
-including their retained exit/error states. They are local to the focused
-window and current run. Names/colors/bindings are not saved across app restarts.
+renaming, color changes or removal of preceding tabs. Ordinary closed tabs lose
+their binding. A saved template keeps its opening/activation shortcut after its
+tab is closed. Shortcuts are local to the focused window.
 Shortcut keys use the current layout's unmodified logical key and exact
 modifiers. Desktop-reserved chords may not be capturable; Ctrl+Alt may overlap
 AltGr on some layouts. Prefer free Ctrl+Shift combinations or function keys.
+
+**Als Vorlage speichern** links the current tab to a new saved configuration
+without starting another process. Choose a name, color, optional shortcut,
+zsh/Bash and an absolute start directory. **Vorlagen** lists saved entries;
+opening activates their existing tab, including an exited/error tab, or starts
+one new session. Name/color/shortcut edits to a linked tab save automatically.
+Ordinary tabs remain temporary. The list supports arrows/Home/End, Enter to
+open, E to edit, Delete to remove, and Escape to return. Removing a template
+clears its link and inherited shortcut, while its open tab keeps running.
+
+Templates load from `$XDG_CONFIG_HOME/hoori-term/templates-v1.json`, or
+`$HOME/.config/hoori-term/templates-v1.json`. Startup still opens only the
+ordinary default session. Storage runs in the background; load/write errors
+are visible and preserve existing files. Pending changes are not described as
+saved. See [local templates](docs/hoo-13-templates.md) for limits, recovery,
+start-directory semantics and the targeted validation procedure.
 
 Running sessions require confirmation naming the affected tabs; Escape or
 **Abbrechen** keeps them alive, Enter or **Beenden** confirms. Window close
@@ -111,6 +130,8 @@ The [refresh comparison](docs/hoo-15-refresh-comparison.md) records the bounded
 HOO-15 `top`/GNOME investigation, raw evidence, timing limits and follow-up proposal.
 The [connected tab-strip validation](docs/hoo-19-tab-strip.md) describes the
 HOO-19 layout, input routing and real comparison/regression procedure.
+The [template validation](docs/hoo-13-templates.md) covers HOO-13 configuration,
+stable links, asynchronous storage and the bundled X11 restart/error exercise.
 
 ## Versioned review builds
 
