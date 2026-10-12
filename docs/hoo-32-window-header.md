@@ -16,7 +16,9 @@ their identity or position. The hash stays visible with menus and confirmations,
 while the OS title also retains it for task switching and inspection.
 
 Drag the dotted/hash area with the primary mouse button to request native
-window movement. Double-click it to toggle maximization. A six pixel border
+window movement after four pixels of deliberate motion. A click alone does not
+start a native grab, preserving double-click and focus-loss cancellation.
+Double-click it to toggle maximization. A six pixel border
 requests native resizing in all eight directions; corner targets extend along
 the border for sixteen pixels. Resizing is disabled while maximized or closing.
 Selections started inside terminal content remain selections when they reach
@@ -52,8 +54,9 @@ dispatches native tasks before modal terminal filters. PTY I/O remains on the
 existing bounded asynchronous path.
 
 The implementation uses iced 0.14's native minimize, toggle-maximize, drag and
-drag-resize tasks. Drag/resize requests start on primary button press, with no
-global positioning assumption. Focus, resize and scale events query actual
+drag-resize tasks. Drag starts with movement while the primary button remains
+held; resize starts on the border press. Neither uses a global positioning
+assumption. Focus, resize and scale events query actual
 maximization. A one second query while focused catches external state changes
 that produce no size change; it is absent while unfocused/minimized. Only the
 latest observation revision updates the displayed state.
@@ -75,7 +78,9 @@ native close requests, cancellation and exact real-PTY input isolation.
 
 `scripts/gui-window-chrome-smoke.py ABSOLUTE_LAUNCHER NEW_OUTPUT_DIRECTORY`
 runs one bundled X11 exercise against an owned new window and isolated local
-template fixtures. It checks three mixed Bash/zsh sessions, native movement,
+template fixtures. It needs xdotool, xprop, xwininfo, xrandr, xclip, ImageMagick
+`import` and wmctrl (the baseline does not need wmctrl). It checks three mixed
+Bash/zsh sessions, native movement,
 terminal selection at an edge, keyboard maximize, external restore, double-click,
 all eight resize directions with actual PTY dimensions, minimize/OS return with
 continued inactive output, modal close/cancel, exact bracketed paste/input bytes,

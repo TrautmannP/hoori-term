@@ -256,15 +256,32 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         && now.duration_since(time) <= std::time::Duration::from_millis(300)
                 });
                 pointer.click = (!double).then_some((point, now));
-                pointer.pressed = None;
-                Some(
-                    canvas::Action::publish(Message::WindowAction(if double {
-                        WindowAction::Control(Control::Maximize)
-                    } else {
-                        WindowAction::Drag
-                    }))
-                    .and_capture(),
-                )
+                pointer.pressed = (!double).then_some(Target::Drag);
+                // A simple click must not start a native grab: GNOME/X11
+                // emits Unfocused/Focused for it and breaks double-clicks.
+                // Start movement as soon as the held pointer moves instead.
+                Some(if double {
+                    canvas::Action::publish(Message::WindowAction(WindowAction::Control(
+                        Control::Maximize,
+                    )))
+                    .and_capture()
+                } else {
+                    canvas::Action::capture()
+                })
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+                if pointer.pressed == Some(Target::Drag) =>
+            {
+                let moving = pointer.click.is_some_and(|(origin, _)| {
+                    cursor.position().is_some_and(|p| origin.distance(p) >= 4.0)
+                });
+                Some(if moving {
+                    pointer.pressed = None;
+                    pointer.click = None;
+                    canvas::Action::publish(Message::WindowAction(WindowAction::Drag)).and_capture()
+                } else {
+                    canvas::Action::capture()
+                })
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if target.is_some() => {
                 pointer.pressed = target;
@@ -275,7 +292,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 if pointer.pressed.is_some() =>
             {
                 let pressed = pointer.pressed.take();
-                Some(if pressed == target {
+                Some(if pressed == target && pressed != Some(Target::Drag) {
                     canvas::Action::publish(match target.unwrap() {
                         Target::Window(control) => {
                             Message::WindowAction(WindowAction::Control(control))
@@ -310,10 +327,13 @@ impl canvas::Program<Message> for TabStrip<'_> {
 
     fn mouse_interaction(
         &self,
-        _: &PointerState,
+        pointer: &PointerState,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        if pointer.pressed == Some(Target::Drag) {
+            return mouse::Interaction::Grabbing;
+        }
         match cursor
             .position_in(bounds)
             .and_then(|p| {
@@ -657,6 +677,94 @@ mod tests {
     use super::*;
     use hoori_term::tabs::Shell;
     use hoori_term::terminal::GridSize;
+    use iced::widget::canvas::Program;
+
+    #[test]
+    fn header_clicks_allow_double_click_and_only_held_motion_requests_drag() {
+        let tabs = Tabs::default();
+        let state = State::default();
+        let strip = TabStrip {
+            tabs: &tabs,
+            state: &state,
+            interactive: true,
+            window_interactive: true,
+            maximized: false,
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, HEIGHT));
+        let point = Layout::new(1000.0, 0).drag.center();
+        let cursor = mouse::Cursor::Available(point);
+        let mut pointer = PointerState {
+            width: 1000.0,
+            ..Default::default()
+        };
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        assert!(
+            strip
+                .update(&mut pointer, &press, bounds, cursor)
+                .unwrap()
+                .into_inner()
+                .0
+                .is_none()
+        );
+        assert!(
+            strip
+                .update(&mut pointer, &release, bounds, cursor)
+                .unwrap()
+                .into_inner()
+                .0
+                .is_none()
+        );
+        // A click alone must not issue drag and trigger GNOME's native focus
+        // grab before the next click can be recognized.
+        pointer.click = Some((point, std::time::Instant::now()));
+        assert!(matches!(
+            strip
+                .update(&mut pointer, &press, bounds, cursor)
+                .unwrap()
+                .into_inner()
+                .0,
+            Some(Message::WindowAction(WindowAction::Control(
+                Control::Maximize
+            )))
+        ));
+        let _ = strip.update(&mut pointer, &release, bounds, cursor);
+        let _ = strip.update(&mut pointer, &press, bounds, cursor);
+        let moved = Point::new(point.x + 8.0, point.y);
+        let motion = Event::Mouse(mouse::Event::CursorMoved { position: moved });
+        assert!(matches!(
+            strip
+                .update(
+                    &mut pointer,
+                    &motion,
+                    bounds,
+                    mouse::Cursor::Available(moved)
+                )
+                .unwrap()
+                .into_inner()
+                .0,
+            Some(Message::WindowAction(WindowAction::Drag))
+        ));
+        assert!(pointer.click.is_none() && pointer.pressed.is_none());
+        let _ = strip.update(&mut pointer, &press, bounds, cursor);
+        let _ = strip.update(
+            &mut pointer,
+            &Event::Window(iced::window::Event::Unfocused),
+            bounds,
+            cursor,
+        );
+        assert!(pointer.click.is_none() && pointer.pressed.is_none());
+        let action = strip.update(
+            &mut pointer,
+            &motion,
+            bounds,
+            mouse::Cursor::Available(moved),
+        );
+        assert!(!matches!(
+            action.and_then(|a| a.into_inner().0),
+            Some(Message::WindowAction(_))
+        ));
+    }
 
     #[test]
     fn overflow_hit_targets_and_reveal_use_stable_identity() {

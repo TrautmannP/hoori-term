@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import runpy
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -71,7 +72,13 @@ def drag(w, x, y, dx, dy):
     command('xdotool', 'mousemove', '--window', w.id, str(x), str(y))
     command('xdotool', 'mousedown', '1')
     try:
-        time.sleep(.15)  # Native move/resize request must begin while held.
+        time.sleep(.15)
+        # Cross the deliberate-motion threshold while held, then continue the
+        # gesture after the native manager has received the request.
+        command('xdotool', 'mousemove', '--sync',
+                str(before['X'] + x + (4 if dx > 0 else -4 if dx else 0)),
+                str(before['Y'] + y + (4 if dy > 0 else -4 if dy else 0)))
+        time.sleep(.1)
         command('xdotool', 'mousemove', '--sync',
                 str(before['X'] + x + dx), str(before['Y'] + y + dy))
         time.sleep(.2)
@@ -113,6 +120,11 @@ def main():
     parser.add_argument('--only', choices=['all', 'window', 'layouts', 'empty'], default='all')
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11', 'This exercise proves X11 only'
+    required = ['xdotool', 'xprop', 'xwininfo', 'xrandr', 'xclip', 'import']
+    if not args.baseline:
+        required.append('wmctrl')
+    missing = [name for name in required if shutil.which(name) is None]
+    assert not missing, f'Missing X11 test tools: {", ".join(missing)}'
     binary, output = args.binary.resolve(), args.output.resolve()
     output.mkdir(exist_ok=False, parents=True)
     config = output / 'config'
