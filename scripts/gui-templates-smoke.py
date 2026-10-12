@@ -16,9 +16,19 @@ import signal
 import time
 
 base = runpy.run_path(str(Path(__file__).with_name("gui-identity-smoke.py")))
-Window, command, wait_for, click, edit, capture = (
-    base[k] for k in ["Window", "command", "wait_for", "click", "edit", "capture"]
+Window, command, wait_for, click, capture = (
+    base[k] for k in ["Window", "command", "wait_for", "click", "capture"]
 )
+
+
+def edit(w, label, color_x, key):
+    base["open_editor"](w)
+    base["name"](w, label)
+    time.sleep(.2)  # Settle the last text event before clicking away.
+    click(w, color_x, 183)
+    capture(w, key)
+    w.key("Return")
+    wait_for(lambda: "Tab bearbeiten" not in w.title() and label in w.title())
 
 
 def read_json(path):
@@ -85,6 +95,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--resume-after-removal", type=Path,
+                        help="Run only remaining scenarios using a preserved post-removal fixture")
     args = parser.parse_args()
     assert os.environ.get("XDG_SESSION_TYPE") == "x11", "This harness proves X11 only"
     binary, output = args.binary.resolve(), args.output.resolve()
@@ -182,149 +194,189 @@ finally:
         return proof
 
     try:
-        w = make_window("01-initial")
-        first = track(w)
-        assert len(first) == 1
-        # Preserve the established ordinary default startup directory behavior.
-        assert Path(os.readlink(f"/proc/{first[0]}/cwd")) == Path(os.environ["HOME"]).resolve()
-        clean_prompt(w, state="ONE")
-        w.marker("HOO-13 one-ready")
-        edit(w, "Backend", 256, "F8")
-        w.key("ctrl+shift+s")
-        wait_for(lambda: "Als Vorlage speichern" in w.title())
-        directory(w, literal)
-        shot(w, "01-save-zsh-template.png")
-        w.key("Return")
-        wait_for(lambda: "Als Vorlage speichern" not in w.title())
-        wait_for(lambda: read_json(file) and len(read_json(file)["items"]) == 1)
-        assert children(w) == first
-        assert Path(os.readlink(f"/proc/{first[0]}/cwd")) != literal
-        w.key("ctrl+shift+b")
-        wait_for(lambda: "bash · 2" in w.title())
-        clean_prompt(w, bash=True, state="TWO")
-        w.marker("HOO-13 two-ready")
-        edit(w, "Admin", 430, "F9")
-        before_save = track(w)
-        save_current(w, bash_directory, bash=True)
-        wait_for(lambda: read_json(file) and len(read_json(file)["items"]) == 2)
-        assert children(w) == before_save
-        initial = snapshot("01-two-saved.json")
-        backend_id, admin_id = [entry["id"] for entry in initial["items"]]
-        report["initial_template_ids"] = [backend_id, admin_id]
-        w.key("ctrl+shift+t")
-        wait_for(lambda: "zsh · 3" in w.title())
-        clean_prompt(w, state="THREE")
-        w.marker("HOO-13 ordinary-ready")
-        edit(w, "Temporary", 489, "F10")
-        pids = track(w)
-        assert len(pids) == 3
-        assert len(read_json(file)["items"]) == 2
-        report["initial_shell_pids"] = pids
-        shot(w, "02-two-templates-and-ordinary-tab.png")
-        for key, label, state in [("F8", "Backend", "ONE"), ("F9", "Admin", "TWO")]:
-            w.key(key)
-            wait_for(lambda: label in w.title())
-            w.run("printf '\\033]2;HOO-13 retained %s\\007' \"$HOO13_STATE\"")
-            wait_for(lambda: f"retained {state}" in w.title())
+        if args.resume_after_removal:
+            previous = args.resume_after_removal.resolve()
+            previous_report = read_json(previous / "failure-report.json")
+            remaining = read_json(previous / "snapshots/03-admin-removed.json")
+            assert previous_report and remaining and len(remaining["items"]) == 1
+            backend_id, admin_id = previous_report["initial_template_ids"]
+            assert remaining["items"][0]["id"] == backend_id
+            literal = Path(remaining["items"][0]["directory"])
+            bash_directory = Path(previous_report["bash_directory"])
+            assert literal.is_dir() and bash_directory.is_dir()
+            file.parent.mkdir(parents=True)
+            file.write_text(json.dumps(remaining, ensure_ascii=False, indent=2))
+            report.update({
+                "scope": "remaining-scenarios-after-template-removal",
+                "continued_from": str(previous / "failure-report.json"),
+                "fixture_source": str(previous / "snapshots/03-admin-removed.json"),
+                "literal_directory": str(literal),
+                "bash_directory": str(bash_directory),
+                "initial_template_ids": [backend_id, admin_id],
+            })
+            w = make_window("01-remainder-fixture")
+            defaults = track(w)
+            assert len(defaults) == 1
+            wait_for(lambda: "Vorlagen werden geladen" not in w.title())
+            time.sleep(.3)
+            w.key("F11")
+            wait_for(lambda: "Web" in w.title())
+            web_pid = list(set(track(w)) - set(defaults))[0]
+            assert Path(os.readlink(f"/proc/{web_pid}/cwd")) == literal
+            clean_prompt(w, state="REMAINDER_WEB")
+            w.marker("HOO-13 remainder Web ready")
+            w.key("ctrl+shift+b")
+            wait_for(lambda: "bash · 3" in w.title())
+            clean_prompt(w, bash=True, state="REMAINDER_ADMIN")
+            w.marker("HOO-13 remainder Admin ready")
+            pids = track(w)
+            assert len(pids) == 3
+            remaining = snapshot("03-admin-removed.json")
+            phase("remaining-scenarios-fixture-ready")
+        else:
+            w = make_window("01-initial")
+            first = track(w)
+            assert len(first) == 1
+            # Preserve the established ordinary default startup directory behavior.
+            assert Path(os.readlink(f"/proc/{first[0]}/cwd")) == Path(os.environ["HOME"]).resolve()
+            clean_prompt(w, state="ONE")
+            w.marker("HOO-13 one-ready")
+            edit(w, "Backend", 256, "F8")
+            w.key("ctrl+shift+s")
+            wait_for(lambda: "Als Vorlage speichern" in w.title())
+            directory(w, literal)
+            shot(w, "01-save-zsh-template.png")
+            w.key("Return")
+            wait_for(lambda: "Als Vorlage speichern" not in w.title())
+            wait_for(lambda: read_json(file) and len(read_json(file)["items"]) == 1)
+            assert children(w) == first
+            assert Path(os.readlink(f"/proc/{first[0]}/cwd")) != literal
+            w.key("ctrl+shift+b")
+            wait_for(lambda: "bash · 2" in w.title())
+            clean_prompt(w, bash=True, state="TWO")
+            w.marker("HOO-13 two-ready")
+            edit(w, "Admin", 430, "F9")
+            before_save = track(w)
+            save_current(w, bash_directory, bash=True)
+            wait_for(lambda: read_json(file) and len(read_json(file)["items"]) == 2)
+            assert children(w) == before_save
+            initial = snapshot("01-two-saved.json")
+            backend_id, admin_id = [entry["id"] for entry in initial["items"]]
+            report["initial_template_ids"] = [backend_id, admin_id]
+            w.key("ctrl+shift+t")
+            wait_for(lambda: "zsh · 3" in w.title())
+            clean_prompt(w, state="THREE")
+            w.marker("HOO-13 ordinary-ready")
+            edit(w, "Temporary", 489, "F10")
+            pids = track(w)
+            assert len(pids) == 3
+            assert len(read_json(file)["items"]) == 2
+            report["initial_shell_pids"] = pids
+            shot(w, "02-two-templates-and-ordinary-tab.png")
+            for key, label, state in [("F8", "Backend", "ONE"), ("F9", "Admin", "TWO")]:
+                w.key(key)
+                wait_for(lambda: label in w.title())
+                w.run("printf '\\033]2;HOO-13 retained %s\\007' \"$HOO13_STATE\"")
+                wait_for(lambda: f"retained {state}" in w.title())
+                assert children(w) == pids
+            show_list(w)
+            shot(w, "03-saved-list-live-tabs.png")
+            w.key("Home")
+            w.key("Return")
+            wait_for(lambda: "Backend" in w.title() and " — Vorlagen — " not in w.title())
             assert children(w) == pids
-        show_list(w)
-        shot(w, "03-saved-list-live-tabs.png")
-        w.key("Home")
-        w.key("Return")
-        wait_for(lambda: "Backend" in w.title() and " — Vorlagen — " not in w.title())
-        assert children(w) == pids
-        edit(w, "Web", 311, "F11")
-        wait_for(lambda: read_json(file)["items"][0]["identity"]["name"] == "Web")
-        edited = snapshot("02-auto-edited.json")
-        assert edited["items"][0]["id"] == backend_id
-        assert edited["items"][0]["identity"]["accent"] == "green"
-        assert edited["items"][0]["identity"]["shortcut"]["key"] == "F11"
-        w.key("ctrl+shift+e")
-        wait_for(lambda: "Tab bearbeiten" in w.title())
-        capture(w, "F9")
-        shot(w, "04-template-shortcut-conflict.png")
-        assert read_json(file) == edited
-        w.key("Escape")
-        w.key("Escape")
-        wait_for(lambda: "Tab bearbeiten" not in w.title())
-        assert children(w) == pids
-        report["save_link_auto_edit_conflict_and_ordinary_tab"] = True
-        phase("saved-linked-configuration-without-extra-processes")
-        close_window(w, pids, cancel=True)
+            edit(w, "Web", 311, "F11")
+            wait_for(lambda: read_json(file)["items"][0]["identity"]["name"] == "Web")
+            edited = snapshot("02-auto-edited.json")
+            assert edited["items"][0]["id"] == backend_id
+            assert edited["items"][0]["identity"]["accent"] == "green"
+            assert edited["items"][0]["identity"]["shortcut"]["key"] == "F11"
+            w.key("ctrl+shift+e")
+            wait_for(lambda: "Tab bearbeiten" in w.title())
+            capture(w, "F9")
+            shot(w, "04-template-shortcut-conflict.png")
+            assert read_json(file) == edited
+            w.key("Escape")
+            w.key("Escape")
+            wait_for(lambda: "Tab bearbeiten" not in w.title())
+            assert children(w) == pids
+            report["save_link_auto_edit_conflict_and_ordinary_tab"] = True
+            phase("saved-linked-configuration-without-extra-processes")
+            close_window(w, pids, cancel=True)
 
-        w = make_window("02-restart")
-        default_pid = track(w)
-        assert len(default_pid) == 1
-        time.sleep(.3)
-        assert children(w) == default_pid
-        assert read_json(file) == edited
-        show_list(w)
-        shot(w, "05-restart-no-template-autostart.png")
-        w.key("Escape")
-        w.key("F11")
-        wait_for(lambda: "Web" in w.title())
-        web_pid = list(set(track(w)) - set(default_pid))[0]
-        assert Path(os.readlink(f"/proc/{web_pid}/cwd")) == literal
-        assert Path(os.readlink(f"/proc/{web_pid}/exe")).name == "zsh"
-        clean_prompt(w, state="REOPENED_WEB")
-        w.marker("HOO-13 Web directory verified")
-        show_list(w)
-        w.key("Home")
-        w.key("Return")
-        wait_for(lambda: "Web" in w.title() and " — Vorlagen — " not in w.title())
-        assert children(w) == sorted([*default_pid, web_pid])
-        shot(w, "06-reopened-zsh-literal-directory.png")
-        w.key("F9")
-        wait_for(lambda: "Admin" in w.title())
-        admin_pid = list(set(track(w)) - set(default_pid) - {web_pid})[0]
-        assert Path(os.readlink(f"/proc/{admin_pid}/cwd")) == bash_directory
-        assert Path(os.readlink(f"/proc/{admin_pid}/exe")).name == "bash"
-        clean_prompt(w, bash=True, state="REOPENED_ADMIN")
-        w.marker("HOO-13 Bash directory verified")
-        pids = track(w)
-        shot(w, "07-reopened-bash-directory.png")
-        report["restarted_shell_pids"] = pids
-        report["reopened_web_pid"] = web_pid
-        report["reopened_admin_pid"] = admin_pid
-        assert read_json(file) == edited  # Runtime titles are not configuration.
-        proof = reader(w, "routing.bin")
-        w.key("F11")
-        wait_for(lambda: "Web" in w.title())
-        w.key("F9")
-        wait_for(lambda: "Admin" in w.title() and "raw-ready" in w.title())
-        show_list(w)
-        w.key("a")
-        w.key("Escape")
-        w.key("ctrl+shift+e")
-        wait_for(lambda: "Tab bearbeiten" in w.title())
-        w.type("draft only")
-        w.key("Escape")
-        w.key("F12")
-        w.type("!")
-        wait_for(proof.exists)
-        assert proof.read_bytes() == b"\x1b[24~!"
-        wait_for(lambda: "raw-done" in w.title())
-        assert children(w) == pids
-        report["restart_no_autostart_exact_directories_repeated_open_and_raw_routing"] = True
-        phase("restart-and-literal-directory-routing-proved")
+            w = make_window("02-restart")
+            default_pid = track(w)
+            assert len(default_pid) == 1
+            time.sleep(.3)
+            assert children(w) == default_pid
+            assert read_json(file) == edited
+            show_list(w)
+            shot(w, "05-restart-no-template-autostart.png")
+            w.key("Escape")
+            w.key("F11")
+            wait_for(lambda: "Web" in w.title())
+            web_pid = list(set(track(w)) - set(default_pid))[0]
+            assert Path(os.readlink(f"/proc/{web_pid}/cwd")) == literal
+            assert Path(os.readlink(f"/proc/{web_pid}/exe")).name == "zsh"
+            clean_prompt(w, state="REOPENED_WEB")
+            w.marker("HOO-13 Web directory verified")
+            show_list(w)
+            w.key("Home")
+            w.key("Return")
+            wait_for(lambda: "Web" in w.title() and " — Vorlagen — " not in w.title())
+            assert children(w) == sorted([*default_pid, web_pid])
+            shot(w, "06-reopened-zsh-literal-directory.png")
+            w.key("F9")
+            wait_for(lambda: "Admin" in w.title())
+            admin_pid = list(set(track(w)) - set(default_pid) - {web_pid})[0]
+            assert Path(os.readlink(f"/proc/{admin_pid}/cwd")) == bash_directory
+            assert Path(os.readlink(f"/proc/{admin_pid}/exe")).name == "bash"
+            clean_prompt(w, bash=True, state="REOPENED_ADMIN")
+            w.marker("HOO-13 Bash directory verified")
+            pids = track(w)
+            shot(w, "07-reopened-bash-directory.png")
+            report["restarted_shell_pids"] = pids
+            report["reopened_web_pid"] = web_pid
+            report["reopened_admin_pid"] = admin_pid
+            assert read_json(file) == edited  # Runtime titles are not configuration.
+            proof = reader(w, "routing.bin")
+            w.key("F11")
+            wait_for(lambda: "Web" in w.title())
+            w.key("F9")
+            wait_for(lambda: "Admin" in w.title() and "raw-ready" in w.title())
+            show_list(w)
+            w.key("a")
+            w.key("Escape")
+            w.key("ctrl+shift+e")
+            wait_for(lambda: "Tab bearbeiten" in w.title())
+            w.type("draft only")
+            w.key("Escape")
+            w.key("F12")
+            w.type("!")
+            wait_for(proof.exists)
+            assert proof.read_bytes() == b"\x1b[24~!"
+            wait_for(lambda: "raw-done" in w.title())
+            assert children(w) == pids
+            report["restart_no_autostart_exact_directories_repeated_open_and_raw_routing"] = True
+            phase("restart-and-literal-directory-routing-proved")
 
-        proof = reader(w, "removed-shortcut.bin")
-        show_list(w)
-        w.key("Home")
-        w.key("Down")
-        w.key("Delete")
-        wait_for(lambda: len(read_json(file)["items"]) == 1)
-        remaining = snapshot("03-admin-removed.json")
-        assert remaining["items"][0]["id"] == backend_id
-        assert children(w) == pids
-        w.key("Escape")
-        assert "Admin" in w.title()
-        w.key("F9")  # Removed inherited binding now reaches the temporary tab.
-        w.type("!")
-        wait_for(proof.exists)
-        assert proof.read_bytes() == b"\x1b[20~!"
-        wait_for(lambda: "raw-done" in w.title())
-        shot(w, "08-remove-keeps-running-tab.png")
+            proof = reader(w, "removed-shortcut.bin")
+            show_list(w)
+            w.key("Home")
+            w.key("Down")
+            w.key("Delete")
+            wait_for(lambda: len(read_json(file)["items"]) == 1)
+            remaining = snapshot("03-admin-removed.json")
+            assert remaining["items"][0]["id"] == backend_id
+            assert children(w) == pids
+            w.key("Escape")
+            assert "Admin" in w.title()
+            w.key("F9")  # Removed inherited binding now reaches the temporary tab.
+            w.type("!")
+            wait_for(proof.exists)
+            assert proof.read_bytes() == b"\x1b[20~!"
+            wait_for(lambda: "raw-done" in w.title())
+            shot(w, "08-remove-keeps-running-tab.png")
         edit(w, "Temporary Admin", 430, "F10")
         assert read_json(file) == remaining
         # Explicitly saving the now-temporary tab creates a fresh saved ID.

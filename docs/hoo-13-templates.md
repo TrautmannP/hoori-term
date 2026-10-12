@@ -169,3 +169,14 @@ and embedded commit identity. Per-delivery `VALIDATION.md`, local-check logs,
 GUI reports and checksums accompany the clean merged review build outside
 the repository. Existing valid terminal/Vim/strip evidence retains its actual
 older commit; unchanged full GUI suites are not repeated on intermediate builds.
+
+If a run stops after its preserved `03-admin-removed.json` snapshot, continue
+only the unrun lifecycle/storage scenarios in another unused directory:
+
+```sh
+python3 scripts/gui-templates-smoke.py /absolute/review-build/launch /absolute/new-remainder-directory --resume-after-removal /absolute/original-evidence-directory
+```
+
+The continuation report identifies its narrower scope and original fixture.
+It does not turn the interrupted original run into a complete pass. Retain
+and assess the original assertions, images and failure separately.
