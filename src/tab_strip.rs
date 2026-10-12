@@ -633,7 +633,9 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 let mut details = if tab.identity.compact || shortcut.is_empty() {
                     format!("PTY:{state}")
                 } else {
-                    format!("{shortcut} PTY:{state}")
+                    // Keep the actual process state visible even with a long
+                    // localized binding; full bindings remain in inspection.
+                    format!("{} PTY:{state}", ellipsis(&shortcut, 4))
                 };
                 if tab.pinned {
                     details = format!("PIN {details}");
@@ -667,7 +669,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     frame,
                     ellipsis(&details, if tab.identity.compact { 14 } else { 24 }),
                     Point::new(rect.x + if tab.identity.compact { 8.0 } else { 28.0 }, 40.0),
-                    9.0,
+                    if tab.identity.compact { 9.0 } else { 8.0 },
                     if state == "Fehler" {
                         Color::from_rgb8(255, 150, 161)
                     } else {

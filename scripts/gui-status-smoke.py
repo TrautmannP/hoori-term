@@ -273,7 +273,6 @@ def main():
                 update(6, osc('id=build/child:state=done') + osc('id=build:state=blocked:kind=auth'))
                 shot(w, '07-inactive-details-live-update.png')
                 w.key('Escape')
-                w.key('Escape')  # Return strip focus to terminal input.
                 activate(w, 2)
                 # Direct activation reveals compact pinned tab 2 at the viewport's left.
                 command('xdotool', 'mousemove', '--window', w.id, '95', '20')

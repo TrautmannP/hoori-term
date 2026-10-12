@@ -1169,6 +1169,7 @@ impl App {
             }
             Message::HideInspection => {
                 self.inspecting = None;
+                self.strip.focused = None;
                 self.cache.clear();
             }
             Message::InspectionScrolled(offset) => self.inspection_scroll = offset,
@@ -2880,10 +2881,21 @@ mod tests {
         assert_eq!(app.catalog, before_inspection);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
         assert!(app.inspecting.is_none());
+        assert!(app.strip.focused.is_none());
+        // Closing inactive-tab details returns ordinary text to the current
+        // PTY immediately, rather than swallowing it as tab-strip navigation.
+        let _ = app.keyboard(Key::Character("r".into()), mods, Some("r".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(first).unwrap().terminal.shell_title == "data-72"
+        });
+        assert_eq!(app.tabs.get(second).unwrap().terminal.shell_title, "ready");
         let _ = app.update(Message::InspectTab(first)); // Same target-safe mouse route.
         assert_eq!(app.inspecting, Some(first));
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
         assert!(app.inspecting.is_none());
+        assert!(app.strip.focused.is_none());
+        let _ = app.action(Action::FocusTabs);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowRight), mods, None);
         let _ = app.keyboard(Key::Character("c".into()), mods, Some("c".into()));
         assert!(app.tabs.get(second).unwrap().identity.compact);
         assert!(!app.tabs.get(first).unwrap().identity.compact);
@@ -2994,7 +3006,7 @@ mod tests {
         let _ = app.update(Message::SetPinned(first, false));
         let _ = app.keyboard(Key::Character("q".into()), mods, Some("q".into()));
         wait(&mut app, |a| {
-            a.tabs.get(first).unwrap().terminal.shell_title == "data-71"
+            a.tabs.get(first).unwrap().terminal.shell_title == "data-7271"
         });
         assert_eq!(app.tabs.get(second).unwrap().terminal.shell_title, "ready");
         assert!(app.title().contains("Backend"));
@@ -3118,7 +3130,10 @@ mod tests {
         wait(&mut app, |a| {
             a.tabs.get(second).unwrap().terminal.shell_title == "data-777a"
         });
-        assert_eq!(app.tabs.get(first).unwrap().terminal.shell_title, "data-71");
+        assert_eq!(
+            app.tabs.get(first).unwrap().terminal.shell_title,
+            "data-7271"
+        );
         assert_eq!(app.tabs.items.len(), 2);
     }
 
