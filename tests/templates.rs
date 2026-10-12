@@ -62,6 +62,7 @@ fn draft(name: &str, key: Named, directory: &str) -> Template {
         },
         shell: TemplateShell::Bash,
         directory: directory.into(),
+        pinned: false,
     }
 }
 
@@ -438,4 +439,71 @@ fn interrupted_temporary_file_and_symlink_do_not_replace_valid_configuration() {
         assert!(link.save(&Catalog::default(), None).is_err());
         assert_eq!(fs::read(&file.path).unwrap(), saved.stamp);
     }
+}
+
+#[test]
+fn pin_state_survives_save_reopen_legacy_data_and_failed_persistence() {
+    let fixture = Fixture::new();
+    let file = fixture.file();
+    let mut tabs = Tabs::default();
+    let tab = model_tab(&mut tabs);
+    tabs.set_pinned(tab, true).unwrap();
+    let mut catalog = Catalog::default();
+    let id = catalog
+        .save_tab(&mut tabs, tab, draft("Pinned", Named::F8, "/tmp"))
+        .unwrap();
+    assert!(catalog.get(id).unwrap().pinned); // Save inherits actual tab state.
+    let saved = file.save(&catalog, None).unwrap();
+    assert_eq!(file.load().unwrap().catalog, catalog);
+    let mut legacy: serde_json::Value = serde_json::from_slice(&saved.stamp).unwrap();
+    legacy["items"][0].as_object_mut().unwrap().remove("pinned");
+    assert!(
+        !Catalog::from_bytes(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .pinned
+    );
+    legacy["items"][0]["pinned"] = "true".into();
+    assert!(Catalog::from_bytes(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    tabs.remove(CloseTarget::PinnedTab(tab));
+    let mut restarted = Tabs::default();
+    let ordinary = model_tab(&mut restarted);
+    let mut loaded = file.load().unwrap().catalog;
+    assert_eq!(restarted.items.len(), 1); // Loading never starts templates.
+    // Use a nonexistent future cwd so no real shell is needed in this model test.
+    let mut draft = loaded.get(id).unwrap().clone();
+    draft.directory = "/nonexistent/hoo17-fixture".into();
+    loaded.edit(&mut restarted, draft).unwrap();
+    let reopened = loaded
+        .open(&mut restarted, id, GridSize::new(80, 24))
+        .unwrap();
+    assert_eq!(restarted.items[0].id, reopened);
+    assert!(restarted.get(reopened).unwrap().pinned);
+    assert_eq!(
+        loaded
+            .open(&mut restarted, id, GridSize::new(80, 24))
+            .unwrap(),
+        reopened
+    );
+    assert_eq!(restarted.items.len(), 2);
+    assert!(loaded.set_pinned(&mut restarted, reopened, false).unwrap());
+    assert!(!loaded.get(id).unwrap().pinned);
+    let lock = file.path.with_extension("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(file.save(&loaded, Some(&saved.stamp)).is_err());
+    assert_eq!(fs::read(&file.path).unwrap(), saved.stamp); // On-disk pin remains true.
+    fs::remove_dir(&lock).unwrap();
+    file.save(&loaded, Some(&saved.stamp)).unwrap();
+    assert!(!file.load().unwrap().catalog.get(id).unwrap().pinned);
+    loaded.set_pinned(&mut restarted, reopened, true).unwrap();
+    loaded.remove(&mut restarted, id).unwrap();
+    assert!(restarted.get(reopened).unwrap().pinned);
+    assert!(restarted.get(reopened).unwrap().template.is_none());
+    assert!(restarted.get(reopened).unwrap().identity.shortcut.is_none());
+    assert_eq!(
+        restarted.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+        [reopened, ordinary]
+    );
 }

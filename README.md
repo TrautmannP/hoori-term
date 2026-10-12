@@ -6,6 +6,7 @@ selection, clipboard and bounded scrollback are available. Tabs can be named,
 colored and assigned their own direct shortcuts while their shells keep running.
 Explicit local templates preserve selected configurations for later, deliberate
 opening. They never resume processes or automatically open extra startup tabs.
+Pinned tabs form a front group and resist normal individual close actions.
 
 ## Run
 
@@ -32,7 +33,9 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | Move / maximize or restore window | Drag / double-click the dotted build-hash area |
 | Resize window | Drag a window edge or corner |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
-| Close active tab | Ctrl+Shift+W or its × button |
+| Close active unpinned tab | Ctrl+Shift+W or its × button |
+| Pin / unpin the active tab | **Tab anpinnen** / **Tab entpinnen** |
+| Explicitly close a pinned tab | **Angepinnten Tab schließen** |
 | Edit active tab name / accent / direct shortcut | Ctrl+Shift+E or **Tab bearbeiten** |
 | Save active tab as a template / edit its linked template | Ctrl+Shift+S or **Als Vorlage speichern** / **Vorlage bearbeiten** |
 | List saved templates | Ctrl+Shift+P or **Vorlagen** |
@@ -86,7 +89,9 @@ opening activates their existing tab, including an exited/error tab, or starts
 one new session. Name/color/shortcut edits to a linked tab save automatically.
 Ordinary tabs remain temporary. The list supports arrows/Home/End, Enter to
 open, E to edit, Delete to remove, and Escape to return. Removing a template
-clears its link and inherited shortcut, while its open tab keeps running.
+clears its link and inherited shortcut, while its open tab keeps running and
+retains its current pin state. Saving a pinned tab captures that state; linked
+pin changes save automatically. Pinning ordinary tabs alone saves no template.
 
 Templates load from `$XDG_CONFIG_HOME/hoori-term/templates-v1.json`, or
 `$HOME/.config/hoori-term/templates-v1.json`. Startup still opens only the
@@ -98,7 +103,11 @@ start-directory semantics and the targeted validation procedure.
 Running sessions require confirmation naming the affected tabs; Escape or
 **Abbrechen** keeps them alive, Enter or **Beenden** confirms. Window close
 names all running targets. A terminated shell leaves its output and exit
-status visible until its tab is closed, without another confirmation.
+status visible until its tab is closed, without another process confirmation.
+Pinned tabs keep normal close protection after exit. Unpin them or explicitly
+choose **Angepinnten Tab schließen**. The **PIN** marker and separated front
+group distinguish pinning from the active tab and its accent color. Window close
+still includes all running pinned targets in its named confirmation.
 A startup error affects its own tab. No terminal contents or input are logged
 by the application; shells may apply their own history/startup configuration.
 
@@ -140,6 +149,8 @@ The [template validation](docs/hoo-13-templates.md) covers HOO-13 configuration,
 stable links, asynchronous storage and the bundled X11 restart/error exercise.
 The [window-header validation](docs/hoo-32-window-header.md) covers native window
 operations, focus, reserved geometry and the targeted X11 evidence procedure.
+The [pinning validation](docs/hoo-17-pinning.md) covers stable groups, protected
+close, the stored pin field and the bundled X11 restart/write-error exercise.
 
 ## Versioned review builds
 

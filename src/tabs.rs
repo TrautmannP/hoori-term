@@ -102,6 +102,7 @@ pub struct Tab {
     default_label: String,
     pub identity: Identity,
     pub template: Option<TemplateId>,
+    pub pinned: bool,
     pub shell: Shell,
     pub terminal: Terminal,
     pub session: Option<Session>,
@@ -132,6 +133,7 @@ impl Tab {
             default_label: format!("{name} · {}", id.0),
             identity: Identity::default(),
             template: None,
+            pinned: false,
             shell,
             terminal: Terminal::new(size),
             session,
@@ -213,7 +215,14 @@ impl Tab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseTarget {
     Tab(TabId),
+    PinnedTab(TabId),
     Window,
+}
+
+impl CloseTarget {
+    fn includes(self, id: TabId) -> bool {
+        self == Self::Window || self == Self::Tab(id) || self == Self::PinnedTab(id)
+    }
 }
 
 pub struct Tabs {
@@ -233,6 +242,35 @@ impl Default for Tabs {
 }
 
 impl Tabs {
+    pub fn pinned_count(&self) -> usize {
+        self.items.iter().take_while(|tab| tab.pinned).count()
+    }
+
+    /// Move only the changed tab to the end of its destination group. Moving
+    /// the existing value preserves its transport, identity and terminal.
+    pub fn set_pinned(&mut self, id: TabId, pinned: bool) -> Result<(), String> {
+        let index = self
+            .items
+            .iter()
+            .position(|tab| tab.id == id)
+            .ok_or("Dieser Tab ist nicht mehr geöffnet")?;
+        if self.items[index].pinned != pinned {
+            let mut tab = self.items.remove(index);
+            tab.pinned = pinned;
+            let destination = if pinned {
+                self.pinned_count()
+            } else {
+                self.items.len()
+            };
+            self.items.insert(destination, tab);
+        }
+        Ok(())
+    }
+
+    pub fn close_protected(&self, target: CloseTarget) -> bool {
+        matches!(target, CloseTarget::Tab(id) if self.get(id).is_some_and(|tab| tab.pinned))
+    }
+
     pub fn get(&self, id: TabId) -> Option<&Tab> {
         self.items.iter().find(|t| t.id == id)
     }
@@ -342,7 +380,7 @@ impl Tabs {
     pub fn running_names(&self, target: CloseTarget) -> Vec<String> {
         self.items
             .iter()
-            .filter(|t| target == CloseTarget::Window || target == CloseTarget::Tab(t.id))
+            .filter(|t| target.includes(t.id))
             .filter(|t| t.state() == ProcessState::Running)
             .map(Tab::description)
             .collect()
@@ -351,6 +389,9 @@ impl Tabs {
     /// Only call after the UI has confirmed all running targets. Return live
     /// transports so the caller can shut them down outside the event loop.
     pub fn remove(&mut self, target: CloseTarget) -> Vec<Session> {
+        if self.close_protected(target) {
+            return Vec::new();
+        }
         let index = self
             .items
             .iter()
@@ -358,7 +399,7 @@ impl Tabs {
             .unwrap_or(0);
         let mut removed = Vec::new();
         self.items.retain_mut(|tab| {
-            if target == CloseTarget::Window || target == CloseTarget::Tab(tab.id) {
+            if target.includes(tab.id) {
                 if let Some(session) = tab.session.take() {
                     removed.push(session);
                 }

@@ -11,6 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const HEIGHT: f32 = 52.0;
 const TAB_WIDTH: f32 = 224.0;
+const GROUP_GAP: f32 = 12.0;
 const BAR: Color = Color::from_rgb8(16, 18, 27);
 const HOVER: Color = Color::from_rgb8(31, 34, 48);
 const TEXT: Color = Color::from_rgb8(219, 224, 239);
@@ -37,27 +38,27 @@ pub struct State {
 }
 
 impl State {
-    pub fn layout(&self, count: usize) -> Layout {
-        Layout::new(self.width, count)
+    pub fn layout(&self, tabs: &Tabs) -> Layout {
+        Layout::new(self.width, tabs.items.len(), tabs.pinned_count())
     }
 
-    pub fn scroll(&mut self, count: usize, delta: f32) {
-        self.offset = (self.offset + delta).clamp(0.0, self.layout(count).max_offset);
+    pub fn scroll(&mut self, tabs: &Tabs, delta: f32) {
+        self.offset = (self.offset + delta).clamp(0.0, self.layout(tabs).max_offset);
         // Layout/navigation can move the old target without a pointer event.
         self.hovered = None;
     }
 
     pub fn reveal(&mut self, tabs: &Tabs, id: TabId) {
         if let Some(index) = tabs.items.iter().position(|tab| tab.id == id) {
-            let layout = self.layout(tabs.items.len());
-            let left = index as f32 * TAB_WIDTH;
+            let layout = self.layout(tabs);
+            let left = layout.tab(index, 0.0).x - layout.viewport.x;
             let right = left + TAB_WIDTH;
             if left < self.offset {
                 self.offset = left;
             } else if right > self.offset + layout.viewport.width {
                 self.offset = right - layout.viewport.width;
             }
-            self.scroll(tabs.items.len(), 0.0);
+            self.scroll(tabs, 0.0);
         }
     }
 
@@ -92,10 +93,11 @@ pub struct Layout {
     drag: Rectangle,
     window: [Rectangle; 3],
     overflow: bool,
+    group_boundary: Option<usize>,
 }
 
 impl Layout {
-    pub fn new(width: f32, count: usize) -> Self {
+    pub fn new(width: f32, count: usize, pinned: usize) -> Self {
         // The native minimum width is 640. Reserve the same chrome space at
         // every width: one complete tab remains revealable at that minimum.
         let width = width.max(640.0);
@@ -107,19 +109,27 @@ impl Layout {
                 Size::new(36.0, 36.0),
             )
         });
-        let overflow = count as f32 * TAB_WIDTH > drag.x - 64.0;
+        let group_boundary = (pinned > 0 && pinned < count).then_some(pinned);
+        let span = count as f32 * TAB_WIDTH
+            + if group_boundary.is_some() {
+                GROUP_GAP
+            } else {
+                0.0
+            };
+        let overflow = span > drag.x - 64.0;
         let left = if overflow { 68.0 } else { 8.0 };
         let viewport = Rectangle::new(
             Point::new(left, 0.0),
             Size::new((plus.x - 8.0 - left).max(0.0), HEIGHT),
         );
         Self {
-            max_offset: (count as f32 * TAB_WIDTH - viewport.width).max(0.0),
+            max_offset: (span - viewport.width).max(0.0),
             viewport,
             plus,
             drag,
             window,
             overflow,
+            group_boundary,
         }
     }
 
@@ -146,7 +156,18 @@ impl Layout {
 
     fn tab(&self, index: usize, offset: f32) -> Rectangle {
         Rectangle::new(
-            Point::new(self.viewport.x + index as f32 * TAB_WIDTH - offset, 8.0),
+            Point::new(
+                self.viewport.x + index as f32 * TAB_WIDTH - offset
+                    + if self
+                        .group_boundary
+                        .is_some_and(|boundary| index >= boundary)
+                    {
+                        GROUP_GAP
+                    } else {
+                        0.0
+                    },
+                8.0,
+            ),
             Size::new(TAB_WIDTH, HEIGHT - 8.0),
         )
     }
@@ -234,7 +255,11 @@ impl canvas::Program<Message> for TabStrip<'_> {
             pointer.pressed = None;
             return None;
         }
-        let layout = Layout::new(bounds.width, self.tabs.items.len());
+        let layout = Layout::new(
+            bounds.width,
+            self.tabs.items.len(),
+            self.tabs.pinned_count(),
+        );
         let target = cursor
             .position_in(bounds)
             .and_then(|p| layout.hit(self.tabs, self.state.offset, p))
@@ -337,11 +362,12 @@ impl canvas::Program<Message> for TabStrip<'_> {
         match cursor
             .position_in(bounds)
             .and_then(|p| {
-                Layout::new(bounds.width, self.tabs.items.len()).hit(
-                    self.tabs,
-                    self.state.offset,
-                    p,
+                Layout::new(
+                    bounds.width,
+                    self.tabs.items.len(),
+                    self.tabs.pinned_count(),
                 )
+                .hit(self.tabs, self.state.offset, p)
             })
             .filter(|target| self.enabled(*target))
         {
@@ -360,7 +386,11 @@ impl canvas::Program<Message> for TabStrip<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let layout = Layout::new(bounds.width, self.tabs.items.len());
+        let layout = Layout::new(
+            bounds.width,
+            self.tabs.items.len(),
+            self.tabs.pinned_count(),
+        );
         let hover = cursor
             .position_in(bounds)
             .and_then(|p| layout.hit(self.tabs, self.state.offset, p))
@@ -376,6 +406,11 @@ impl canvas::Program<Message> for TabStrip<'_> {
             );
         });
         frame.with_clip(layout.viewport, |frame| {
+            if let Some(boundary) = layout.group_boundary {
+                let x = layout.viewport.x + boundary as f32 * TAB_WIDTH - self.state.offset
+                    + GROUP_GAP / 2.0;
+                frame.fill_rectangle(Point::new(x - 1.0, 12.0), Size::new(2.0, 32.0), MUTED);
+            }
             for (index, tab) in self.tabs.items.iter().enumerate() {
                 let rect = layout.tab(index, self.state.offset);
                 if rect.x + rect.width <= layout.viewport.x
@@ -401,6 +436,8 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         view::BACKGROUND
                     } else if hovered {
                         HOVER
+                    } else if tab.pinned {
+                        Color::from_rgb8(24, 28, 41)
                     } else {
                         BAR
                     },
@@ -453,13 +490,16 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     .as_ref()
                     .map(|s| s.label())
                     .unwrap_or_default();
-                let details = if state.is_empty() {
+                let mut details = if state.is_empty() {
                     shortcut
                 } else if shortcut.is_empty() {
                     state.into()
                 } else {
                     format!("{state} · {shortcut}")
                 };
+                if tab.pinned {
+                    details = format!("PIN · {details}");
+                }
                 tab_label(
                     frame,
                     ellipsis(&details, 24),
@@ -691,7 +731,7 @@ mod tests {
             maximized: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, HEIGHT));
-        let point = Layout::new(1000.0, 0).drag.center();
+        let point = Layout::new(1000.0, 0, 0).drag.center();
         let cursor = mouse::Cursor::Available(point);
         let mut pointer = PointerState {
             width: 1000.0,
@@ -784,7 +824,7 @@ mod tests {
                 ..Default::default()
             };
             state.reveal(&tabs, target);
-            let layout = state.layout(tabs.items.len());
+            let layout = state.layout(&tabs);
             assert!(layout.viewport.width >= TAB_WIDTH);
             assert!(layout.viewport.x + layout.viewport.width <= layout.plus.x);
             assert!(layout.plus.x + layout.plus.width < layout.drag.x);
@@ -826,9 +866,9 @@ mod tests {
             state.focused = Some(Target::Tab(target));
             state.traverse(&tabs, false);
             assert_eq!(state.focused, Some(Target::Close(target)));
-            state.scroll(tabs.items.len(), f32::MAX);
+            state.scroll(&tabs, f32::MAX);
             assert_eq!(state.offset, layout.max_offset);
-            state.scroll(tabs.items.len(), -f32::MAX);
+            state.scroll(&tabs, -f32::MAX);
             assert_eq!(state.offset, 0.0);
             state.focused = Some(Target::Tab(tabs.items[0].id));
             for control in Control::ALL.into_iter().rev() {
@@ -837,6 +877,33 @@ mod tests {
             }
             state.traverse(&tabs, true);
             assert_eq!(state.focused, Some(Target::Plus));
+        }
+        tabs.set_pinned(target, true).unwrap();
+        tabs.set_pinned(tabs.items[5].id, true).unwrap();
+        for width in [640.0, 1280.0] {
+            let mut state = State {
+                width,
+                ..Default::default()
+            };
+            let layout = state.layout(&tabs);
+            assert_eq!(layout.group_boundary, Some(2));
+            assert_eq!(
+                layout.tab(2, 0.0).x - layout.tab(1, 0.0).x,
+                TAB_WIDTH + GROUP_GAP
+            );
+            for tab in &tabs.items {
+                state.reveal(&tabs, tab.id);
+                let index = tabs.items.iter().position(|t| t.id == tab.id).unwrap();
+                let rect = layout.tab(index, state.offset);
+                assert!(
+                    rect.x >= layout.viewport.x
+                        && rect.x + rect.width <= layout.viewport.x + layout.viewport.width
+                );
+                assert_eq!(
+                    layout.hit(&tabs, state.offset, rect.center()),
+                    Some(Target::Tab(tab.id))
+                );
+            }
         }
     }
 }
