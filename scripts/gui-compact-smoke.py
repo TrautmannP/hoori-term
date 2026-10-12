@@ -19,9 +19,28 @@ helpers = runpy.run_path(str(Path(__file__).with_name('gui-window-chrome-smoke.p
 base = helpers['helpers']
 Window, command, wait_for, click, start_time, read_json = [base[n] for n in
     ('Window', 'command', 'wait_for', 'click', 'start_time', 'read_json')]
-resize, clipboard, configure, long_name = [helpers[n] for n in
-    ('resize', 'clipboard', 'configure', 'long_name')]
+resize, clipboard, long_name = [helpers[n] for n in
+    ('resize', 'clipboard', 'long_name')]
 SYMBOLS = ['terminal', 'code', 'folder', 'server', 'database', 'branch', 'star', 'shield']
+
+
+def configure(w, label, color, key):
+    helpers['identity']['open_editor'](w)
+    click(w, 240, 114)
+    w.key('ctrl+a')
+    clipboard(label.encode())
+    w.key('ctrl+v')
+    time.sleep(.25)
+    click(w, color, 183)
+    # The recorder is right aligned; the inherited 830px position applies
+    # only to a 1000px window, while this exercise starts at 1280px.
+    width = helpers['geometry'](w)['WIDTH']
+    click(w, width - 170, 222)
+    time.sleep(.15)
+    w.key(key)
+    time.sleep(.2)
+    w.key('Return')
+    wait_for(lambda: 'Tab bearbeiten' not in w.title() and label in w.title())
 
 
 def main():
@@ -215,6 +234,8 @@ finally:
             assert [t['identity']['compact'] for t in state['items']] == [False, True]
             assert [t['pinned'] for t in state['items']] == [False, True]
             assert [t['identity']['symbol'] for t in state['items']] == ['star', 'star']
+            assert [t['identity']['shortcut'] for t in state['items']] == [
+                {'key': 'F1', 'modifiers': 0}, {'key': 'F2', 'modifiers': 0}]
             w.key('ctrl+shift+b')
             wait_for(lambda: 'bash · 3' in w.title())
             logs = list(set(track(w)) - {backend, admin})[0]
