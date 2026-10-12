@@ -78,7 +78,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
     parser.add_argument('output', type=Path)
-    parser.add_argument('--only', choices=['all', 'fixtures', 'clis', 'restart'], default='all')
+    parser.add_argument('--only', choices=['all', 'fixtures', 'layouts', 'clis', 'restart'], default='all')
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11'
     binary, output = args.binary.resolve(), args.output.resolve()
@@ -195,7 +195,7 @@ def main():
         wait_for(lambda: 'Titel/Status' in w.title())
 
     try:
-        if args.only in ('all', 'fixtures'):
+        if args.only in ('all', 'fixtures', 'layouts'):
             w = make_window('01-fixtures')
             assert len(track(w)) == 1
             compact['configure'](w, long_name(1), 311, 'F1')
@@ -245,78 +245,83 @@ def main():
             shot(w, '05-minimum-window-last-record.png')
             w.key('Home')
             shot(w, '06-minimum-window-full-own-identity.png')
-            w.key('F12')
-            w.key('x')
-            w.key('ctrl+shift+t')
-            clipboard(b'HIDDEN_STATUS_INPUT')
-            w.key('ctrl+shift+v')
-            time.sleep(.2)
-            assert active(w) == 6 and track(w) == pids
-            assert all(proof(i)['input_hex'] == '' for i in range(1, 13))
-            w.key('Escape')
-            wait_for(lambda: 'Titel/Status' not in w.title())
-            sized(w, 1280)
-            activate(w, 1)
-            # Keyboard focus on inactive tab 6 (order is pin 2,3; ordinary 1,4..12).
-            w.key('ctrl+shift+l')
-            w.key('Home')
-            for _ in range(5):
-                w.key('Right')
-            w.key('i')
-            wait_for(lambda: 'Titel/Status' in w.title())
-            assert active(w) == 1
-            update(6, osc('id=build/child:state=done') + osc('id=build:state=blocked:kind=auth'))
-            shot(w, '07-inactive-details-live-update.png')
-            w.key('Escape')
-            w.key('Escape')  # Return strip focus to terminal input.
-            activate(w, 2)
-            # Direct activation reveals compact pinned tab 2 at the viewport's left.
-            command('xdotool', 'mousemove', '--window', w.id, '95', '20')
-            command('xdotool', 'click', '3')
-            wait_for(lambda: 'Titel/Status' in w.title())
-            shot(w, '08-mouse-full-compact-pinned-details.png')
-            w.key('Return')
-            w.key('ctrl+shift+w')
-            assert 'Schließen bestätigen' not in w.title()
-            assert track(w) == pids
-            activate(w, 6)
-            update(6, b'\x1b[?1049h\x1b[!p\x1b[?1049l')
-            clipboard(b'STATUS_ONLY\nsecond')
-            w.key('ctrl+shift+v')
-            w.type('ok!')
-            expected = b'\x1b[200~STATUS_ONLY\nsecond\x1b[201~ok!'
-            wait_for(lambda: bytes.fromhex(proof(6)['input_hex']) == expected)
-            assert all(proof(i)['input_hex'] == '' for i in range(1, 13) if i != 6)
-            report['active_input_exact_hex'] = expected.hex()
-            report['inspection_direct_shortcut_plus_paste_do_not_leak'] = True
-            sized(w, 640, 600)
-            sized(w, 1280, 700)
-            assert len({tuple(size) for size in proof(6)['sizes']}) > 1
-            command('xdotool', 'mousemove', '--window', w.id, '12', '72')
-            command('xdotool', 'mousedown', '1')
-            command('xdotool', 'mousemove', '--sync', '--window', w.id, '158', '72')
-            command('xdotool', 'mouseup', '1')
-            w.key('ctrl+shift+c')
-            assert command('xclip', '-selection', 'clipboard', '-o') == 'HOO29_SELECTION'
-            shot(w, '09-selection-ansi-after-resize.png')
-            update(6, b'\x1b]133;A\x1b\\')
-            inspect_active(w)
-            shot(w, '10-prompt-keeps-only-results.png')
-            w.key('Escape')
-            update(6, b'\x1bc')
-            inspect_active(w)
-            shot(w, '11-ris-clears-title-and-reports.png')
-            w.key('Escape')
-            update(6, osc('state=blocked:kind=question') + osc('id=result:state=error'), exit_code=7)
-            wait_for(lambda: start_time(shell_pids[6]) != owned[shell_pids[6]])
-            inspect_active(w)
-            shot(w, '12-exited-pty-retained-error-result.png')
-            w.key('Escape')
-            assert file.read_bytes() == original
-            assert all(start_time(pid) == owned[pid] for tab, pid in shell_pids.items() if tab != 6)
-            report['runtime_metadata_does_not_write_catalog_or_change_other_pids'] = True
-            close(w, '13-own-names-window-close-cancel.png')
-            phase('twelve-tabs-title-status-details-routing-lifecycle-complete')
+            if args.only == 'layouts':
+                w.key('Escape')
+                close(w)
+                phase('changed-header-layouts-only-complete')
+            else:
+                w.key('F12')
+                w.key('x')
+                w.key('ctrl+shift+t')
+                clipboard(b'HIDDEN_STATUS_INPUT')
+                w.key('ctrl+shift+v')
+                time.sleep(.2)
+                assert active(w) == 6 and track(w) == pids
+                assert all(proof(i)['input_hex'] == '' for i in range(1, 13))
+                w.key('Escape')
+                wait_for(lambda: 'Titel/Status' not in w.title())
+                sized(w, 1280)
+                activate(w, 1)
+                # Keyboard focus on inactive tab 6 (order is pin 2,3; ordinary 1,4..12).
+                w.key('ctrl+shift+l')
+                w.key('Home')
+                for _ in range(5):
+                    w.key('Right')
+                w.key('i')
+                wait_for(lambda: 'Titel/Status' in w.title())
+                assert active(w) == 1
+                update(6, osc('id=build/child:state=done') + osc('id=build:state=blocked:kind=auth'))
+                shot(w, '07-inactive-details-live-update.png')
+                w.key('Escape')
+                w.key('Escape')  # Return strip focus to terminal input.
+                activate(w, 2)
+                # Direct activation reveals compact pinned tab 2 at the viewport's left.
+                command('xdotool', 'mousemove', '--window', w.id, '95', '20')
+                command('xdotool', 'click', '3')
+                wait_for(lambda: 'Titel/Status' in w.title())
+                shot(w, '08-mouse-full-compact-pinned-details.png')
+                w.key('Return')
+                w.key('ctrl+shift+w')
+                assert 'Schließen bestätigen' not in w.title()
+                assert track(w) == pids
+                activate(w, 6)
+                update(6, b'\x1b[?1049h\x1b[!p\x1b[?1049l')
+                clipboard(b'STATUS_ONLY\nsecond')
+                w.key('ctrl+shift+v')
+                w.type('ok!')
+                expected = b'\x1b[200~STATUS_ONLY\nsecond\x1b[201~ok!'
+                wait_for(lambda: bytes.fromhex(proof(6)['input_hex']) == expected)
+                assert all(proof(i)['input_hex'] == '' for i in range(1, 13) if i != 6)
+                report['active_input_exact_hex'] = expected.hex()
+                report['inspection_direct_shortcut_plus_paste_do_not_leak'] = True
+                sized(w, 640, 600)
+                sized(w, 1280, 700)
+                assert len({tuple(size) for size in proof(6)['sizes']}) > 1
+                command('xdotool', 'mousemove', '--window', w.id, '12', '72')
+                command('xdotool', 'mousedown', '1')
+                command('xdotool', 'mousemove', '--sync', '--window', w.id, '158', '72')
+                command('xdotool', 'mouseup', '1')
+                w.key('ctrl+shift+c')
+                assert command('xclip', '-selection', 'clipboard', '-o') == 'HOO29_SELECTION'
+                shot(w, '09-selection-ansi-after-resize.png')
+                update(6, b'\x1b]133;A\x1b\\')
+                inspect_active(w)
+                shot(w, '10-prompt-keeps-only-results.png')
+                w.key('Escape')
+                update(6, b'\x1bc')
+                inspect_active(w)
+                shot(w, '11-ris-clears-title-and-reports.png')
+                w.key('Escape')
+                update(6, osc('state=blocked:kind=question') + osc('id=result:state=error'), exit_code=7)
+                wait_for(lambda: start_time(shell_pids[6]) != owned[shell_pids[6]])
+                inspect_active(w)
+                shot(w, '12-exited-pty-retained-error-result.png')
+                w.key('Escape')
+                assert file.read_bytes() == original
+                assert all(start_time(pid) == owned[pid] for tab, pid in shell_pids.items() if tab != 6)
+                report['runtime_metadata_does_not_write_catalog_or_change_other_pids'] = True
+                close(w, '13-own-names-window-close-cancel.png')
+                phase('twelve-tabs-title-status-details-routing-lifecycle-complete')
 
         if args.only in ('all', 'clis'):
             w = make_window('02-actual-clis')
@@ -337,11 +342,13 @@ def main():
             wait_for(lambda: (output / 'continue-codex').exists(), timeout=60)
             wait_for(lambda: any(e['osc'] in (0, 2) and 'codex' in e['body'].lower()
                                  for e in (read_json(codex_log) or {}).get('events', [])), timeout=45)
+            for pid in [read_json(codex_log)[key] for key in ('bridge_pid', 'cli_pid')]:
+                owned[pid] = start_time(pid)
             shot(w, '15-actual-codex-title.png')
             w.type('HOO29 unsent draft')
             w.key('ctrl+shift+b')
             wait_for(lambda: active(w) == 2)
-            compact['configure'](w, 'Claude own identity', 460, 'F2')
+            compact['configure'](w, 'Claude own identity', 460, 'ctrl+shift+F2')
             base['clean_prompt'](w, bash=True)
             claude_args = ['claude', '--safe-mode', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                            '--tools', '', '--disable-slash-commands', '--no-chrome', '--name', 'HOO29 actual Claude']
@@ -353,6 +360,8 @@ def main():
             wait_for(lambda: (output / 'continue-claude').exists(), timeout=60)
             wait_for(lambda: any(e['direction'] == 'output' and e['osc'] == 7501 and 'state=' in e['body']
                                  for e in (read_json(claude_log) or {}).get('events', [])), timeout=45)
+            for pid in [read_json(claude_log)[key] for key in ('bridge_pid', 'cli_pid')]:
+                owned[pid] = start_time(pid)
             shot(w, '17-actual-claude-title-status.png')
             inspect_active(w)
             shot(w, '18-actual-claude-full-reported-details.png')
@@ -360,7 +369,8 @@ def main():
             w.type('HOO29 unsent Claude draft')
             activate(w, 1)
             shot(w, '19-return-to-actual-codex-unsent-draft.png')
-            activate(w, 2)
+            w.key('ctrl+shift+F2')
+            wait_for(lambda: active(w) == 2)
             shot(w, '20-return-to-actual-claude-unsent-draft.png')
             codex_data, claude_data = read_json(codex_log), read_json(claude_log)
             report['codex_actual_output_osc_7501_count'] = sum(e['direction'] == 'output' and e['osc'] == 7501 for e in codex_data['events'])

@@ -574,14 +574,20 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 }
                 let [r, g, b] = tab.identity.accent.rgb();
                 frame.fill(
-                    &Path::circle(Point::new(rect.x + 15.0, 30.0), 3.5),
+                    &Path::circle(
+                        Point::new(
+                            rect.x + 15.0,
+                            if tab.identity.compact { 18.0 } else { 30.0 },
+                        ),
+                        3.5,
+                    ),
                     Color::from_rgb8(r, g, b),
                 );
                 if let Some(symbol) = tab.identity.display_symbol() {
                     crate::symbols_view::draw(
                         frame,
                         Some(symbol),
-                        Point::new(rect.x + 28.0, if tab.identity.compact { 12.0 } else { 8.0 }),
+                        Point::new(rect.x + 28.0, 8.0),
                         16.0,
                         TEXT,
                     );
@@ -625,12 +631,12 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     .map(|s| s.label())
                     .unwrap_or_default();
                 let mut details = if tab.identity.compact || shortcut.is_empty() {
-                    format!("PTY {state}")
+                    format!("PTY:{state}")
                 } else {
-                    format!("{shortcut} · PTY {state}")
+                    format!("{shortcut} PTY:{state}")
                 };
                 if tab.pinned {
-                    details = format!("PIN · {details}");
+                    details = format!("PIN {details}");
                 }
                 let program = &tab.terminal.program_status;
                 let reported = program.summary();
@@ -660,10 +666,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 tab_label(
                     frame,
                     ellipsis(&details, if tab.identity.compact { 14 } else { 24 }),
-                    Point::new(
-                        rect.x + if tab.identity.compact { 8.0 } else { 28.0 },
-                        if tab.identity.compact { 46.0 } else { 43.0 },
-                    ),
+                    Point::new(rect.x + if tab.identity.compact { 8.0 } else { 28.0 }, 40.0),
                     9.0,
                     if state == "Fehler" {
                         Color::from_rgb8(255, 150, 161)
@@ -682,9 +685,9 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     cli,
                     Point::new(
                         rect.x + if tab.identity.compact { 8.0 } else { 132.0 },
-                        if tab.identity.compact { 32.0 } else { 43.0 },
+                        if tab.identity.compact { 27.0 } else { 40.0 },
                     ),
-                    9.0,
+                    8.0,
                     reported.map(|r| status_color(r.state)).unwrap_or(MUTED),
                     layout.viewport,
                     if tab.identity.compact {
