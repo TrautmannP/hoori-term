@@ -71,6 +71,16 @@ pub struct Identity {
     pub shortcut: Option<Shortcut>,
     #[serde(default)]
     pub symbol: Option<Symbol>,
+    #[serde(default)]
+    pub compact: bool,
+}
+
+impl Identity {
+    /// A compact tab needs a neutral drawing even without a chosen symbol.
+    /// This fallback is presentation only and never changes stored identity.
+    pub fn display_symbol(&self) -> Option<Symbol> {
+        self.symbol.or(self.compact.then_some(Symbol::Terminal))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -372,12 +382,12 @@ impl Tabs {
         if let Some(shortcut) = &shortcut {
             self.check_shortcut(id, shortcut)?;
         }
-        let symbol = self.get(id).unwrap().identity.symbol;
+        let previous = self.get(id).unwrap().identity.clone();
         self.get_mut(id).unwrap().identity = Identity {
             name,
             accent,
             shortcut,
-            symbol,
+            ..previous
         };
         Ok(())
     }

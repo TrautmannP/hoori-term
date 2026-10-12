@@ -9,6 +9,8 @@ opening. They never resume processes or automatically open extra startup tabs.
 Pinned tabs form a front group and resist normal individual close actions.
 An optional built-in symbol adds another visual identity cue and is saved with
 explicit templates; no icon font or downloaded resource is required.
+Each tab can independently use a compact symbol view; pinning stays a separate
+property. Saved templates retain the selected presentation.
 
 ## Run
 
@@ -38,9 +40,11 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | Close active unpinned tab | Ctrl+Shift+W or its × button |
 | Pin / unpin the active tab | **Tab anpinnen** / **Tab entpinnen** |
 | Explicitly close a pinned tab | **Angepinnten Tab schließen** |
+| Switch active tab normal / compact | **Kompaktansicht** / **Normalansicht** |
 | Edit active tab name / accent / direct shortcut / symbol | Ctrl+Shift+E or **Tab bearbeiten** |
 | Save active tab as a template / edit its linked template | Ctrl+Shift+S or **Als Vorlage speichern** / **Vorlage bearbeiten** |
 | Choose a symbol while editing | F6 or **Auswählen**; arrows/Tab, Enter; Esc cancels the chooser |
+| Switch the editor's presentation draft | F7 or **Kompakt anzeigen** / **Normal anzeigen** |
 | List saved templates | Ctrl+Shift+P or **Vorlagen** |
 | Select / copy / paste | Drag left mouse / Ctrl+Shift+C / Ctrl+Shift+V |
 | Scroll history | Mouse wheel, Shift+PageUp / Shift+PageDown |
@@ -67,11 +71,17 @@ while editing. Every session continues processing output.
 
 Names remain visible when a shell changes its title. Connected tabs use colored
 accents and a neutral active outline/surface; terminal colors stay controlled by
-the terminal program. Long names are shortened in the strip; hover or the editor
-shows the full name. Scroll arrows and the mouse wheel move overflowing tabs;
+the terminal program. Long names are shortened in the strip; hover, keyboard
+focus details or the editor show the full name. Compact tabs show the chosen
+symbol, accent, process state and PIN separately. With no chosen symbol, a neutral
+Terminal drawing is used only for display; no symbol setting is added. Compact
+presentation never follows overflow or pinning automatically.
+Scroll arrows and the mouse wheel move overflowing tabs;
 the Plus target stays available. Direct navigation reveals its target.
 With strip focus, arrows/Home/End move focus, Tab/Shift+Tab traverse tab/close/Plus
-and window-control targets, Enter/Space selects, Delete requests the focused tab's close, and Escape
+and window-control targets. Full name, unique tab ID and shortcut appear in the
+focus details. C switches the focused tab's normal/compact view and E edits it;
+Enter/Space selects, Delete requests the focused tab's close, and Escape
 returns to terminal input. Focus movement alone preserves the active terminal.
 The system title bar is replaced by minimize, maximize/restore and close buttons
 in the same row. A reserved dotted area moves the window and keeps the build hash
@@ -89,11 +99,11 @@ AltGr on some layouts. Prefer free Ctrl+Shift combinations or function keys.
 without starting another process. Choose a name, color, optional shortcut,
 zsh/Bash and an absolute start directory. **Vorlagen** lists saved entries;
 opening activates their existing tab, including an exited/error tab, or starts
-one new session. Name/color/shortcut edits to a linked tab save automatically.
+one new session. Name/color/shortcut/symbol/presentation edits to a linked tab save automatically.
 Ordinary tabs remain temporary. The list supports arrows/Home/End, Enter to
 open, E to edit, Delete to remove, and Escape to return. Removing a template
 clears its link and inherited shortcut, while its open tab keeps running and
-retains its current pin state. Saving a pinned tab captures that state; linked
+retains its current pin state and presentation. Saving a pinned tab captures that state; linked
 pin changes save automatically. Pinning ordinary tabs alone saves no template.
 
 Templates load from `$XDG_CONFIG_HOME/hoori-term/templates-v1.json`, or
@@ -156,6 +166,8 @@ The [pinning validation](docs/hoo-17-pinning.md) covers stable groups, protected
 close, the stored pin field and the bundled X11 restart/write-error exercise.
 The [symbol validation](docs/hoo-22-symbols.md) covers the original native catalog,
 keyboard/mouse selection, optional stable IDs and targeted GUI/storage evidence.
+The [compact-view validation](docs/hoo-24-compact.md) covers independent pin/view
+combinations, mixed-width geometry, full details and stored presentation.
 
 ## Versioned review builds
 

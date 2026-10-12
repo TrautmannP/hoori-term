@@ -98,6 +98,7 @@ enum Message {
     Activate(hoori_term::tabs::TabId),
     Close(hoori_term::tabs::CloseTarget),
     SetPinned(TabId, bool),
+    SetCompact(TabId, bool),
     Select {
         id: hoori_term::tabs::TabId,
         row: usize,
@@ -113,6 +114,7 @@ enum Message {
     Edit(TabId),
     EditName(String),
     EditAccent(Accent),
+    EditCompact(bool),
     ShowSymbols,
     SelectSymbol(Option<Symbol>),
     CancelSymbols,
@@ -138,7 +140,7 @@ enum Message {
     DiscardAndExit,
 }
 
-use hoori_term::tabs::{Accent, CloseTarget, Shell, TabId, Tabs};
+use hoori_term::tabs::{Accent, CloseTarget, Identity, Shell, TabId, Tabs};
 
 #[derive(Clone, Copy)]
 enum EditorTarget {
@@ -159,9 +161,20 @@ struct TabEditor {
     pinned: bool,
     symbol: Option<Symbol>,
     symbol_picker: Option<usize>,
+    compact: bool,
 }
 
 impl TabEditor {
+    fn identity(&self) -> Identity {
+        Identity {
+            name: Some(self.name.clone()),
+            accent: self.accent,
+            shortcut: self.shortcut.clone(),
+            symbol: self.symbol,
+            compact: self.compact,
+        }
+    }
+
     fn template(&self) -> Result<Template, String> {
         let name = hoori_term::tabs::validated_name(&self.name)?
             .ok_or("Eine Vorlage braucht einen Namen")?;
@@ -170,11 +183,9 @@ impl TabEditor {
                 EditorTarget::Template(id) => id,
                 _ => TemplateId(0),
             },
-            identity: hoori_term::tabs::Identity {
+            identity: Identity {
                 name: Some(name),
-                accent: self.accent,
-                shortcut: self.shortcut.clone(),
-                symbol: self.symbol,
+                ..self.identity()
             },
             shell: self.shell,
             directory: self.directory.clone(),
@@ -355,6 +366,7 @@ impl App {
             accent: tab.identity.accent,
             symbol: tab.identity.symbol,
             symbol_picker: None,
+            compact: tab.identity.compact,
             shortcut: tab.identity.shortcut.clone(),
             pinned: tab.pinned,
             recording: false,
@@ -662,6 +674,10 @@ impl App {
             } else if key == Key::Named(Named::F6) && modifiers.is_empty() {
                 self.editing = Some(editor);
                 return self.update(Message::ShowSymbols);
+            } else if key == Key::Named(Named::F7) && modifiers.is_empty() {
+                let compact = !editor.compact;
+                self.editing = Some(editor);
+                return self.update(Message::EditCompact(compact));
             } else if key == Key::Named(Named::Enter) {
                 self.editing = Some(editor);
                 return self.update(Message::ApplyEdit);
@@ -877,6 +893,18 @@ impl App {
                     return self.request_close(CloseTarget::Tab(id));
                 }
             }
+            Key::Character(c) if modifiers.is_empty() && c.eq_ignore_ascii_case("c") => {
+                if let Some(Target::Tab(id) | Target::Close(id)) = self.strip.focused
+                    && let Some(tab) = self.tabs.get(id)
+                {
+                    return self.update(Message::SetCompact(id, !tab.identity.compact));
+                }
+            }
+            Key::Character(c) if modifiers.is_empty() && c.eq_ignore_ascii_case("e") => {
+                if let Some(Target::Tab(id) | Target::Close(id)) = self.strip.focused {
+                    return self.update(Message::Edit(id));
+                }
+            }
             _ => {}
         }
         Task::none()
@@ -930,6 +958,7 @@ impl App {
                     | Message::Event(..)
                     | Message::EditName(_)
                     | Message::EditAccent(_)
+                    | Message::EditCompact(_)
                     | Message::ShowSymbols
                     | Message::SelectSymbol(_)
                     | Message::CancelSymbols
@@ -1054,6 +1083,18 @@ impl App {
                         self.error = None;
                         self.strip.focused = None;
                         self.reveal_active();
+                        if linked {
+                            return self.persist_changed();
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::SetCompact(id, compact) => {
+                match self.catalog.set_compact(&mut self.tabs, id, compact) {
+                    Ok(linked) => {
+                        self.error = None;
+                        self.strip.reveal(&self.tabs, id);
                         if linked {
                             return self.persist_changed();
                         }
@@ -1196,6 +1237,18 @@ impl App {
                     return operation::focus("tab-name");
                 }
             }
+            Message::EditCompact(compact) => {
+                if let Some(editor) = &mut self.editing
+                    && !editor.recording
+                    && editor.symbol_picker.is_none()
+                {
+                    editor.compact = compact;
+                    return operation::snap_to(
+                        "tab-editor-fields",
+                        operation::RelativeOffset { x: 0.0, y: 1.0 },
+                    );
+                }
+            }
             Message::CancelSymbols => {
                 if let Some(editor) = &mut self.editing {
                     editor.symbol_picker = None;
@@ -1215,14 +1268,10 @@ impl App {
                     && editor.symbol_picker.is_none()
                 {
                     let result = match editor.target {
-                        EditorTarget::Tab(id) => self.catalog.configure_tab(
-                            &mut self.tabs,
-                            id,
-                            &editor.name,
-                            editor.accent,
-                            editor.shortcut.clone(),
-                            editor.symbol,
-                        ),
+                        EditorTarget::Tab(id) => {
+                            self.catalog
+                                .configure_tab(&mut self.tabs, id, editor.identity())
+                        }
                         target => {
                             if !self.templates_loaded {
                                 Err("Vorlagen sind nicht verfügbar".into())
@@ -1245,6 +1294,7 @@ impl App {
                             self.templates_open =
                                 matches!(editor.target, EditorTarget::Template(_));
                             self.editing = None;
+                            self.reveal_active();
                             self.cache.clear();
                             if changed {
                                 let persist = self.persist_changed();
@@ -1313,6 +1363,7 @@ impl App {
                         accent: template.identity.accent,
                         symbol: template.identity.symbol,
                         symbol_picker: None,
+                        compact: template.identity.compact,
                         shortcut: template.identity.shortcut.clone(),
                         recording: false,
                         error: None,
@@ -1397,6 +1448,50 @@ impl App {
         Task::none()
     }
 
+    fn inspect_tab(&self, id: TabId, close: bool) -> String {
+        self.tabs
+            .get(id)
+            .map(|tab| {
+                let shortcut = tab
+                    .identity
+                    .shortcut
+                    .as_ref()
+                    .map(Shortcut::label)
+                    .unwrap_or_else(|| "Kein Shortcut".into());
+                let state = if tab.error.is_some() {
+                    "Fehler".into()
+                } else {
+                    match tab.state() {
+                        ProcessState::Running => "läuft".into(),
+                        ProcessState::Exited(code) => format!("beendet · Exit {code}"),
+                        ProcessState::Failed(_) => "Startfehler".into(),
+                    }
+                };
+                format!(
+                    "{}{} · {shortcut} · {state}{} · {} · Benutzersymbol: {}{}",
+                    if close { "Schließen · " } else { "" },
+                    tab.description(),
+                    if tab.pinned {
+                        " · angepinnt, normales Schließen geschützt"
+                    } else {
+                        ""
+                    },
+                    if tab.identity.compact {
+                        "kompakt"
+                    } else {
+                        "normal"
+                    },
+                    symbols::label(tab.identity.symbol),
+                    if tab.identity.compact && tab.identity.symbol.is_none() {
+                        " (neutraler Terminal-Fallback)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_default()
+    }
+
     fn view(&self) -> Element<'_, Message> {
         use iced::widget::tooltip;
         let interactive = self.confirming.is_none()
@@ -1414,15 +1509,12 @@ impl App {
         .width(Fill)
         .height(tab_strip::HEIGHT);
         let inspection = match self.strip.hovered {
-            Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.tabs.get(id).map(|tab| {
-                let shortcut = tab.identity.shortcut.as_ref().map(|s| format!(" · {}", s.label())).unwrap_or_default();
-                format!("{}{}{}{} · Benutzersymbol: {}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut, if tab.pinned { " · angepinnt, normales Schließen geschützt" } else { "" }, symbols::label(tab.identity.symbol))
-            }).unwrap_or_default(),
+            Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.inspect_tab(id, self.strip.hovered == Some(tab_strip::Target::Close(id))),
             Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
             Some(tab_strip::Target::Window(control)) => format!("{} · Strg+Umschalt+L, Umschalt+Tab: Fensterknöpfe", control.label(self.chrome.maximized)),
             Some(tab_strip::Target::Drag) => format!("{}\nZiehen: Fenster bewegen · Doppelklick: maximieren/wiederherstellen", build_info::metadata()),
-            None => "Tableiste/Fensterknöpfe: Strg+Umschalt+L · Tab/Umschalt+Tab navigieren · Enter auswählen · Esc zurück zum Terminal".into(),
+            None => "Tableiste/Fensterknöpfe: Strg+Umschalt+L · Tab/Umschalt+Tab navigieren · C Ansicht umschalten · E bearbeiten · Esc zurück zum Terminal".into(),
         };
         // Removing the tooltip widget also removes an already visible overlay.
         // A longer delay only affects a future hover and leaves it on dialogs.
@@ -1440,6 +1532,15 @@ impl App {
             header.into()
         };
         let mut content = column![header];
+        if interactive
+            && let Some(target @ (tab_strip::Target::Tab(id) | tab_strip::Target::Close(id))) =
+                self.strip.focused
+        {
+            content = content.push(container(column![
+                text(self.inspect_tab(id, matches!(target, tab_strip::Target::Close(_)))).size(13),
+                text("Tab/Umschalt+Tab oder Pfeile: Details wählen · C: normal/kompakt · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
+            ].spacing(4)).padding([6, 10]).width(Fill).style(container::rounded_box));
+        }
         let storage_status = if self.templates_loading {
             "Vorlagen werden geladen …"
         } else if !self.templates_loaded {
@@ -1494,12 +1595,28 @@ impl App {
                             (interactive && tab.pinned)
                                 .then_some(Message::Close(CloseTarget::PinnedTab(tab.id)))
                         ),
+                    button(
+                        text(if tab.identity.compact {
+                            "Normalansicht"
+                        } else {
+                            "Kompaktansicht"
+                        })
+                        .size(12)
+                    )
+                    .on_press_maybe(
+                        interactive.then_some(Message::SetCompact(tab.id, !tab.identity.compact))
+                    ),
                     text(format!(
-                        "{} · Benutzersymbol: {}",
+                        "{} · {} · Benutzersymbol: {}",
                         if tab.pinned {
                             "PIN · normales Schließen geschützt"
                         } else {
                             "Gewöhnlicher Tab"
+                        },
+                        if tab.identity.compact {
+                            "kompakt"
+                        } else {
+                            "normal"
                         },
                         symbols::label(tab.identity.symbol)
                     ))
@@ -1714,10 +1831,15 @@ impl App {
                         ]
                         .spacing(8),
                         text(format!(
-                            "{} · {}{shortcut} · {state} · Symbol: {} · {directory}",
+                            "{} · {}{shortcut} · {state} · Symbol: {} · {} · {directory}",
                             template.shell.label(),
                             if template.pinned { "PIN · " } else { "" },
                             symbols::label(template.identity.symbol),
+                            if template.identity.compact {
+                                "kompakt"
+                            } else {
+                                "normal"
+                            },
                         ))
                         .size(12),
                     ]
@@ -1869,6 +1991,24 @@ impl App {
                 text(symbols::label(editor.symbol)).size(14).width(Fill),
                 button("Auswählen (F6)")
                     .on_press_maybe((!editor.recording).then_some(Message::ShowSymbols)),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+        fields = fields.push(
+            row![
+                text("Ansicht").size(14).width(70),
+                text(if editor.compact { "Kompakt" } else { "Normal" })
+                    .size(14)
+                    .width(Fill),
+                button(if editor.compact {
+                    "Normal anzeigen (F7)"
+                } else {
+                    "Kompakt anzeigen (F7)"
+                })
+                .on_press_maybe(
+                    (!editor.recording).then_some(Message::EditCompact(!editor.compact))
+                ),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -2268,6 +2408,16 @@ mod tests {
         let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowRight), mods, None);
         assert_eq!(app.strip.focused, Some(tab_strip::Target::Tab(second)));
         assert_eq!(app.tabs.active, Some(first));
+        assert!(app.inspect_tab(second, false).contains("Logs · 2 · F9"));
+        let _ = app.keyboard(Key::Character("c".into()), mods, Some("c".into()));
+        assert!(app.tabs.get(second).unwrap().identity.compact);
+        assert!(!app.tabs.get(first).unwrap().identity.compact);
+        assert_eq!(app.tabs.active, Some(first)); // Details/width change never activates.
+        let _ = app.keyboard(Key::Character("c".into()), mods, Some("c".into()));
+        assert!(!app.tabs.get(second).unwrap().identity.compact);
+        let _ = app.update(Message::SetCompact(first, true)); // Mouse action route.
+        assert!(app.tabs.get(first).unwrap().identity.compact);
+        assert!(app.catalog.items[0].identity.compact);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
         assert_eq!(app.tabs.active, Some(second));
         assert!(app.strip.focused.is_none());
@@ -2340,6 +2490,9 @@ mod tests {
         let _ = app.keyboard(Key::Named(keyboard::key::Named::End), mods, None);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
         assert!(app.editing.as_ref().unwrap().symbol.is_none());
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F7), mods, None);
+        assert!(app.editing.as_ref().unwrap().compact);
+        assert!(!app.tabs.get(second).unwrap().identity.compact);
         let _ = app.update(Message::ShowSymbols);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowRight), mods, None);
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
@@ -2347,10 +2500,13 @@ mod tests {
         assert!(app.tabs.get(second).unwrap().identity.symbol.is_none());
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
         assert!(app.tabs.get(second).unwrap().identity.symbol.is_none());
+        assert!(!app.tabs.get(second).unwrap().identity.compact);
         let _ = app.update(Message::Edit(second));
         let _ = app.update(Message::ShowSymbols);
         let _ = app.update(Message::SelectSymbol(Some(Symbol::Branch))); // Mouse route.
+        let _ = app.update(Message::EditCompact(true));
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert!(app.tabs.get(second).unwrap().identity.compact);
         assert_eq!(
             app.tabs.get(second).unwrap().identity.symbol,
             Some(Symbol::Branch)
@@ -2406,6 +2562,33 @@ mod tests {
         let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
         assert!(app.editing.is_none());
         assert_eq!(app.tabs.get(second).unwrap().label(), "Logs");
+        let _ = app.update(Message::Edit(second));
+        let _ = app.update(Message::CaptureShortcut);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F7), mods, None);
+        assert!(!app.editing.as_ref().unwrap().recording);
+        assert!(app.editing.as_ref().unwrap().compact); // Recorder owns F7, no draft toggle.
+        assert_eq!(
+            app.editing
+                .as_ref()
+                .unwrap()
+                .shortcut
+                .as_ref()
+                .unwrap()
+                .label(),
+            "F7"
+        );
+        let _ = app.update(Message::CancelEdit);
+        assert_eq!(
+            app.tabs
+                .get(second)
+                .unwrap()
+                .identity
+                .shortcut
+                .as_ref()
+                .unwrap()
+                .label(),
+            "F9"
+        );
         let _ = app.keyboard(Key::Character("z".into()), mods, Some("z".into()));
         wait(&mut app, |a| {
             a.tabs.get(second).unwrap().terminal.shell_title == "data-777a"
@@ -2430,6 +2613,7 @@ mod tests {
                         accent: Accent::Blue,
                         shortcut: None,
                         symbol: None,
+                        compact: false,
                     },
                     shell: TemplateShell::Bash,
                     directory: "/tmp".into(),
