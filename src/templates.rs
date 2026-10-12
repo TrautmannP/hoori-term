@@ -1,6 +1,7 @@
 //! Explicit saved configuration, separate from live session identity.
 //! The catalog has no filesystem effects. File operations run on a worker.
 use crate::shortcuts::Shortcut;
+use crate::symbols::Symbol;
 use crate::tabs::{Accent, Identity, Shell, TabId, Tabs, validated_name};
 use crate::terminal::GridSize;
 use iced::keyboard::{Key, Modifiers};
@@ -235,6 +236,7 @@ impl Catalog {
         name: &str,
         accent: Accent,
         shortcut: Option<Shortcut>,
+        symbol: Option<Symbol>,
     ) -> Result<bool, String> {
         let source = tabs.get(tab).ok_or("Dieser Tab ist nicht mehr geöffnet")?;
         let link = source.template;
@@ -252,11 +254,13 @@ impl Catalog {
                 ),
                 accent,
                 shortcut,
+                symbol,
             };
             self.edit(tabs, draft)?;
             Ok(true)
         } else {
             tabs.configure(tab, name, accent, shortcut)?;
+            tabs.get_mut(tab).unwrap().identity.symbol = symbol;
             Ok(false)
         }
     }

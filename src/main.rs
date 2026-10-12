@@ -1,3 +1,4 @@
+mod symbols_view;
 mod tab_strip;
 mod view;
 mod window_chrome;
@@ -7,6 +8,7 @@ use hoori_term::input;
 use hoori_term::notifications::Notifications;
 use hoori_term::session::ProcessState;
 use hoori_term::shortcuts::{self, Action, Shortcut};
+use hoori_term::symbols::{self, Symbol};
 use hoori_term::templates::{
     Catalog, Loaded, Saved, Template, TemplateFile, TemplateId, TemplateShell,
 };
@@ -111,6 +113,9 @@ enum Message {
     Edit(TabId),
     EditName(String),
     EditAccent(Accent),
+    ShowSymbols,
+    SelectSymbol(Option<Symbol>),
+    CancelSymbols,
     CaptureShortcut,
     ClearShortcut,
     ApplyEdit,
@@ -152,6 +157,8 @@ struct TabEditor {
     shell: TemplateShell,
     directory: String,
     pinned: bool,
+    symbol: Option<Symbol>,
+    symbol_picker: Option<usize>,
 }
 
 impl TabEditor {
@@ -167,6 +174,7 @@ impl TabEditor {
                 name: Some(name),
                 accent: self.accent,
                 shortcut: self.shortcut.clone(),
+                symbol: self.symbol,
             },
             shell: self.shell,
             directory: self.directory.clone(),
@@ -185,6 +193,7 @@ struct App {
     pending_shutdowns: usize,
     strip: tab_strip::State,
     chrome: window_chrome::State,
+    viewport_height: f32,
     launching: Option<usize>,
     catalog: Catalog,
     template_file: Option<TemplateFile>,
@@ -219,6 +228,7 @@ impl App {
             pending_shutdowns: 0,
             strip: tab_strip::State::default(),
             chrome: window_chrome::State::default(),
+            viewport_height: 700.0,
             launching: None,
             catalog: Catalog::default(),
             template_file: None,
@@ -343,6 +353,8 @@ impl App {
                 tab.identity.name.clone().unwrap_or_default()
             },
             accent: tab.identity.accent,
+            symbol: tab.identity.symbol,
+            symbol_picker: None,
             shortcut: tab.identity.shortcut.clone(),
             pinned: tab.pinned,
             recording: false,
@@ -444,7 +456,11 @@ impl App {
                 self.chrome.focused = true;
                 self.observe_window()
             }
-            window::Event::Resized(_) | window::Event::Rescaled(_) => self.observe_window(),
+            window::Event::Resized(size) => {
+                self.viewport_height = size.height;
+                self.observe_window()
+            }
+            window::Event::Rescaled(_) => self.observe_window(),
             window::Event::Unfocused => {
                 self.chrome.focused = false;
                 self.strip.focused = None;
@@ -582,6 +598,46 @@ impl App {
             };
         }
         if let Some(mut editor) = self.editing.take() {
+            if let Some(index) = editor.symbol_picker {
+                let count = Symbol::ALL.len() + 1;
+                match key {
+                    Key::Named(Named::Escape) => {
+                        self.editing = Some(editor);
+                        return self.update(Message::CancelSymbols);
+                    }
+                    Key::Named(Named::Enter | Named::Space) => {
+                        self.editing = Some(editor);
+                        return self.update(Message::SelectSymbol(Symbol::choice(index)));
+                    }
+                    Key::Named(Named::ArrowLeft) => {
+                        editor.symbol_picker = Some((index + count - 1) % count)
+                    }
+                    Key::Named(Named::ArrowRight) => {
+                        editor.symbol_picker = Some((index + 1) % count)
+                    }
+                    Key::Named(Named::ArrowUp) => {
+                        editor.symbol_picker = Some((index + count - 3) % count)
+                    }
+                    Key::Named(Named::ArrowDown) => {
+                        editor.symbol_picker = Some((index + 3) % count)
+                    }
+                    Key::Named(Named::Tab) => {
+                        editor.symbol_picker =
+                            Some((index + if modifiers.shift() { count - 1 } else { 1 }) % count)
+                    }
+                    Key::Named(Named::Home) => editor.symbol_picker = Some(0),
+                    Key::Named(Named::End) => editor.symbol_picker = Some(count - 1),
+                    _ => {}
+                }
+                self.editing = Some(editor);
+                return operation::snap_to(
+                    "symbols-list",
+                    operation::RelativeOffset {
+                        x: 0.0,
+                        y: (self.editing.as_ref().unwrap().symbol_picker.unwrap() / 3) as f32 / 2.0,
+                    },
+                );
+            }
             if key == Key::Named(Named::Escape) && modifiers.is_empty() {
                 if editor.recording {
                     editor.recording = false;
@@ -603,6 +659,9 @@ impl App {
                     Ok(None) => {}
                     Err(error) => editor.error = Some(error),
                 }
+            } else if key == Key::Named(Named::F6) && modifiers.is_empty() {
+                self.editing = Some(editor);
+                return self.update(Message::ShowSymbols);
             } else if key == Key::Named(Named::Enter) {
                 self.editing = Some(editor);
                 return self.update(Message::ApplyEdit);
@@ -871,6 +930,9 @@ impl App {
                     | Message::Event(..)
                     | Message::EditName(_)
                     | Message::EditAccent(_)
+                    | Message::ShowSymbols
+                    | Message::SelectSymbol(_)
+                    | Message::CancelSymbols
                     | Message::EditShell(_)
                     | Message::EditDirectory(_)
                     | Message::CaptureShortcut
@@ -1118,6 +1180,28 @@ impl App {
                     editor.error = None;
                 }
             }
+            Message::ShowSymbols => {
+                if let Some(editor) = &mut self.editing
+                    && !editor.recording
+                {
+                    editor.symbol_picker = Some(Symbol::index(editor.symbol));
+                }
+            }
+            Message::SelectSymbol(symbol) => {
+                if let Some(editor) = &mut self.editing
+                    && editor.symbol_picker.is_some()
+                {
+                    editor.symbol = symbol;
+                    editor.symbol_picker = None;
+                    return operation::focus("tab-name");
+                }
+            }
+            Message::CancelSymbols => {
+                if let Some(editor) = &mut self.editing {
+                    editor.symbol_picker = None;
+                    return operation::focus("tab-name");
+                }
+            }
             Message::ClearShortcut => {
                 if let Some(editor) = &mut self.editing {
                     editor.shortcut = None;
@@ -1128,6 +1212,7 @@ impl App {
             Message::ApplyEdit => {
                 if let Some(editor) = &self.editing
                     && !editor.recording
+                    && editor.symbol_picker.is_none()
                 {
                     let result = match editor.target {
                         EditorTarget::Tab(id) => self.catalog.configure_tab(
@@ -1136,6 +1221,7 @@ impl App {
                             &editor.name,
                             editor.accent,
                             editor.shortcut.clone(),
+                            editor.symbol,
                         ),
                         target => {
                             if !self.templates_loaded {
@@ -1225,6 +1311,8 @@ impl App {
                         target: EditorTarget::Template(id),
                         name: template.name().into(),
                         accent: template.identity.accent,
+                        symbol: template.identity.symbol,
+                        symbol_picker: None,
                         shortcut: template.identity.shortcut.clone(),
                         recording: false,
                         error: None,
@@ -1328,7 +1416,7 @@ impl App {
         let inspection = match self.strip.hovered {
             Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.tabs.get(id).map(|tab| {
                 let shortcut = tab.identity.shortcut.as_ref().map(|s| format!(" · {}", s.label())).unwrap_or_default();
-                format!("{}{}{}{}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut, if tab.pinned { " · angepinnt, normales Schließen geschützt" } else { "" })
+                format!("{}{}{}{} · Benutzersymbol: {}", if self.strip.hovered == Some(tab_strip::Target::Close(id)) { "Schließen · " } else { "" }, tab.description(), shortcut, if tab.pinned { " · angepinnt, normales Schließen geschützt" } else { "" }, symbols::label(tab.identity.symbol))
             }).unwrap_or_default(),
             Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
             Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
@@ -1406,11 +1494,15 @@ impl App {
                             (interactive && tab.pinned)
                                 .then_some(Message::Close(CloseTarget::PinnedTab(tab.id)))
                         ),
-                    text(if tab.pinned {
-                        "PIN · normales Schließen geschützt"
-                    } else {
-                        "Gewöhnlicher Tab"
-                    })
+                    text(format!(
+                        "{} · Benutzersymbol: {}",
+                        if tab.pinned {
+                            "PIN · normales Schließen geschützt"
+                        } else {
+                            "Gewöhnlicher Tab"
+                        },
+                        symbols::label(tab.identity.symbol)
+                    ))
                     .size(12)
                     .width(Fill),
                 ]
@@ -1512,7 +1604,9 @@ impl App {
             if let Some(error) = self.error.as_ref().or(tab.error.as_ref()) {
                 content = content.push(container(text(error).size(14)).padding(8));
             }
-            content = content.push(template_toolbar);
+            if self.editing.is_none() {
+                content = content.push(template_toolbar);
+            }
             let status = match tab.state() {
                 ProcessState::Running => "läuft".into(),
                 ProcessState::Exited(code) => format!("beendet · Exit {code}"),
@@ -1620,9 +1714,10 @@ impl App {
                         ]
                         .spacing(8),
                         text(format!(
-                            "{} · {}{shortcut} · {state} · {directory}",
+                            "{} · {}{shortcut} · {state} · Symbol: {} · {directory}",
                             template.shell.label(),
-                            if template.pinned { "PIN · " } else { "" }
+                            if template.pinned { "PIN · " } else { "" },
+                            symbols::label(template.identity.symbol),
                         ))
                         .size(12),
                     ]
@@ -1645,6 +1740,55 @@ impl App {
     }
 
     fn editor_view<'a>(&'a self, editor: &'a TabEditor) -> Element<'a, Message> {
+        if let Some(focused) = editor.symbol_picker {
+            let mut choices = column![].spacing(8);
+            for start in (0..=Symbol::ALL.len()).step_by(3) {
+                let mut line = row![].spacing(8);
+                for index in start..(start + 3).min(Symbol::ALL.len() + 1) {
+                    let symbol = Symbol::choice(index);
+                    line = line.push(
+                        button(
+                            row![
+                                canvas(symbols_view::Icon(symbol)).width(24).height(24),
+                                text(symbols::label(symbol)).size(14),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Center),
+                        )
+                        .width(Fill)
+                        .padding(8)
+                        .on_press(Message::SelectSymbol(symbol))
+                        .style(if index == focused {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }),
+                    );
+                }
+                choices = choices.push(line);
+            }
+            return container(
+                column![
+                    text("Tab-Symbol auswählen").size(18),
+                    text(format!(
+                        "Bisher im Entwurf: {} · Benutzersymbole sind keine Statusmeldungen.",
+                        symbols::label(editor.symbol)
+                    ))
+                    .size(12),
+                    text("Pfeile/Tab wählen · Enter auswählen · Esc zurück ohne Änderung").size(12),
+                    scrollable(choices).id("symbols-list").height(Fill),
+                    row![
+                        space::horizontal(),
+                        button("Abbrechen").on_press(Message::CancelSymbols)
+                    ],
+                ]
+                .spacing(8),
+            )
+            .padding(12)
+            .height(self.editor_height())
+            .style(container::rounded_box)
+            .into();
+        }
         let mut colors = row![text("Farbe").size(14).width(70)]
             .spacing(6)
             .align_y(iced::Center);
@@ -1717,6 +1861,19 @@ impl App {
             .push(text("Startziel und Verzeichnis gelten beim nächsten neuen Prozess. Offene Tabs werden nicht neu gestartet.").size(12));
         }
         fields = fields.push(
+            row![
+                text("Symbol").size(14).width(70),
+                canvas(symbols_view::Icon(editor.symbol))
+                    .width(24)
+                    .height(24),
+                text(symbols::label(editor.symbol)).size(14).width(Fill),
+                button("Auswählen (F6)")
+                    .on_press_maybe((!editor.recording).then_some(Message::ShowSymbols)),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+        fields = fields.push(
             text(if editor.pinned {
                 "PIN · angepinnt. Beim zugehörigen Tab bewusst entpinnen."
             } else {
@@ -1731,21 +1888,31 @@ impl App {
                     .color(iced::Color::from_rgb8(255, 125, 145)),
             );
         }
-        fields = fields.push(
-            row![
-                space::horizontal(),
-                button("Abbrechen")
-                    .on_press(Message::CancelEdit)
-                    .style(button::secondary),
-                button("Übernehmen")
-                    .on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
+        let actions = row![
+            space::horizontal(),
+            button("Abbrechen")
+                .on_press(Message::CancelEdit)
+                .style(button::secondary),
+            button("Übernehmen").on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
+        ]
+        .spacing(8);
+        container(
+            column![
+                scrollable(fields).id("tab-editor-fields").height(Fill),
+                actions
             ]
             .spacing(8),
-        );
-        container(fields)
-            .padding(12)
-            .style(container::rounded_box)
-            .into()
+        )
+        .padding(12)
+        .height(self.editor_height())
+        .style(container::rounded_box)
+        .into()
+    }
+
+    fn editor_height(&self) -> f32 {
+        // Keep the action row reachable on short windows. Only the fields
+        // scroll; the PTY still receives the resulting viewport dimensions.
+        (self.viewport_height - 130.0).clamp(210.0, 420.0)
     }
 }
 
@@ -2166,6 +2333,35 @@ mod tests {
         wait(&mut app, |a| {
             a.tabs.get(second).unwrap().terminal.shell_title == "data-77"
         });
+        // A chooser has its own keyboard scope. Both chooser and editor
+        // cancellation leave live identity untouched; deliberate Apply commits.
+        let _ = app.update(Message::Edit(second));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F6), mods, None);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::End), mods, None);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.editing.as_ref().unwrap().symbol.is_none());
+        let _ = app.update(Message::ShowSymbols);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::ArrowRight), mods, None);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert_eq!(app.editing.as_ref().unwrap().symbol, Some(Symbol::Terminal));
+        assert!(app.tabs.get(second).unwrap().identity.symbol.is_none());
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.tabs.get(second).unwrap().identity.symbol.is_none());
+        let _ = app.update(Message::Edit(second));
+        let _ = app.update(Message::ShowSymbols);
+        let _ = app.update(Message::SelectSymbol(Some(Symbol::Branch))); // Mouse route.
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert_eq!(
+            app.tabs.get(second).unwrap().identity.symbol,
+            Some(Symbol::Branch)
+        );
+        assert_eq!(app.tabs.get(second).unwrap().label(), "Logs");
+        let _ = app.update(Message::Edit(second));
+        let _ = app.update(Message::ShowSymbols);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Home), mods, None);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert!(app.tabs.get(second).unwrap().identity.symbol.is_none());
         let _ = app.update(Message::Edit(second));
         let _ = app.update(Message::EditName("Draft".into()));
         let _ = app.keyboard(Key::Character("r".into()), mods, Some("r".into()));
@@ -2233,6 +2429,7 @@ mod tests {
                         name: Some("Saved".into()),
                         accent: Accent::Blue,
                         shortcut: None,
+                        symbol: None,
                     },
                     shell: TemplateShell::Bash,
                     directory: "/tmp".into(),
