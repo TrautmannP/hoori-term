@@ -1,3 +1,5 @@
+use crate::control_stream::{Control, ControlStream};
+use crate::program_status::{CAPABILITIES, ProgramStatus};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
@@ -5,7 +7,7 @@ use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Osc52};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Handler, Processor};
 use std::sync::{Arc, Mutex};
 
 pub const HISTORY_LINES: usize = 2000;
@@ -45,23 +47,58 @@ impl Dimensions for GridSize {
     }
 }
 
+#[derive(Default)]
+struct PendingEvents {
+    title: Option<Option<String>>,
+    replies: Vec<Event>,
+}
+
 #[derive(Clone, Default)]
-pub struct Events(Arc<Mutex<Vec<Event>>>);
+pub struct Events(Arc<Mutex<PendingEvents>>);
 
 impl EventListener for Events {
     fn send_event(&self, event: Event) {
         // Bound event amplification within each parse batch. Clipboard/host
         // actions are deliberately absent, including OSC 52 at the core level.
-        if matches!(
-            event,
-            Event::Title(_)
-                | Event::ResetTitle
-                | Event::PtyWrite(_)
-                | Event::TextAreaSizeRequest(_)
-        ) {
-            let mut events = self.0.lock().unwrap();
-            if events.len() < 64 {
-                events.push(event);
+        let mut events = self.0.lock().unwrap();
+        match event {
+            // A title flood must retain its last legal update, independently
+            // of the bounded reply queue. It never generates one UI event per
+            // report: all output is already coalesced by the PTY subscription.
+            Event::Title(title) => {
+                events.title = Some(Some(crate::build_info::sanitize_display_text(&title)))
+            }
+            Event::ResetTitle => events.title = Some(None),
+            Event::PtyWrite(_) | Event::TextAreaSizeRequest(_) if events.replies.len() < 64 => {
+                events.replies.push(event);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Events {
+    fn drain(&self, size: GridSize, title: &mut String, replies: &mut Vec<Vec<u8>>) {
+        let mut pending = self.0.lock().unwrap();
+        if let Some(value) = pending.title.take() {
+            *title = value.unwrap_or_default();
+        }
+        for event in pending.replies.drain(..) {
+            if replies.len() >= 64 {
+                continue;
+            }
+            match event {
+                Event::PtyWrite(text) => replies.push(text.into_bytes()),
+                Event::TextAreaSizeRequest(format) => replies.push(
+                    format(WindowSize {
+                        num_lines: size.rows,
+                        num_cols: size.columns,
+                        cell_width: 10,
+                        cell_height: 20,
+                    })
+                    .into_bytes(),
+                ),
+                _ => {}
             }
         }
     }
@@ -70,9 +107,11 @@ impl EventListener for Events {
 pub struct Terminal {
     pub term: Term<Events>,
     parser: Processor,
+    control: ControlStream,
     events: Events,
     pub size: GridSize,
     pub shell_title: String,
+    pub program_status: ProgramStatus,
 }
 
 impl Terminal {
@@ -86,33 +125,64 @@ impl Terminal {
         Self {
             term: Term::new(config, &size, events.clone()),
             parser: Processor::new(),
+            control: ControlStream::default(),
             events,
             size,
             shell_title: String::new(),
+            program_status: ProgramStatus::default(),
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.parser.advance(&mut self.term, bytes);
         let mut replies = Vec::new();
-        for event in self.events.0.lock().unwrap().drain(..) {
-            match event {
-                Event::Title(title) => self.shell_title = crate::build_info::sanitize_title(&title),
-                Event::ResetTitle => self.shell_title.clear(),
-                Event::PtyWrite(text) => replies.push(text.into_bytes()),
-                Event::TextAreaSizeRequest(format) => replies.push(
-                    format(WindowSize {
-                        num_lines: self.size.rows,
-                        num_cols: self.size.columns,
-                        cell_width: 10,
-                        cell_height: 20,
-                    })
-                    .into_bytes(),
-                ),
-                _ => {}
+        self.control.advance(bytes, |control| match control {
+            Control::Core(bytes) => self.parser.advance(&mut self.term, bytes),
+            Control::Reset => {
+                self.program_status.clear();
+                // alacritty's RIS resets its title internally without sending
+                // ResetTitle. Publish that reset after any earlier title event.
+                self.term.set_title(None);
             }
-        }
+            Control::Osc(body, bell) => {
+                if let Some(status) = body.strip_prefix(b"7501;") {
+                    // Preserve query/device-attributes reply ordering. Claude
+                    // uses the latter to detect an unsupported terminal.
+                    self.events
+                        .drain(self.size, &mut self.shell_title, &mut replies);
+                    if status == b"?" {
+                        if replies.len() < 64 {
+                            replies.push(CAPABILITIES.to_vec());
+                        }
+                    } else {
+                        self.program_status.apply(status);
+                    }
+                } else if body == b"133;A" || body.starts_with(b"133;A;") {
+                    self.program_status.prompt_or_exit();
+                } else if let Some(title) = body
+                    .strip_prefix(b"0;")
+                    .or_else(|| body.strip_prefix(b"2;"))
+                {
+                    if let Ok(title) = std::str::from_utf8(title) {
+                        // Retain the full bounded title, including semicolons;
+                        // the core's generic OSC parameter cap must not cut it.
+                        self.term
+                            .set_title(Some(crate::build_info::sanitize_display_text(title)));
+                    }
+                } else {
+                    self.parser.advance(&mut self.term, b"\x1b]");
+                    self.parser.advance(&mut self.term, body);
+                    self.parser
+                        .advance(&mut self.term, if bell { b"\x07" } else { b"\x1b\\" });
+                }
+            }
+        });
+        self.events
+            .drain(self.size, &mut self.shell_title, &mut replies);
         replies
+    }
+
+    pub fn process_ended(&mut self) -> bool {
+        self.program_status.prompt_or_exit()
     }
 
     pub fn resize(&mut self, size: GridSize) {

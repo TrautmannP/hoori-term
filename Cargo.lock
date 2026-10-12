@@ -1003,6 +1003,7 @@ name = "hoori-term"
 version = "0.1.0-dev"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "iced",
  "nix 0.29.0",
  "portable-pty",

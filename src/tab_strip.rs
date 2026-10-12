@@ -368,6 +368,15 @@ impl canvas::Program<Message> for TabStrip<'_> {
             };
         }
         match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+                if self.interactive
+                    && matches!(target, Some(Target::Tab(_) | Target::Close(_))) =>
+            {
+                let Some(Target::Tab(id) | Target::Close(id)) = target else {
+                    unreachable!()
+                };
+                Some(canvas::Action::publish(Message::InspectTab(id)).and_capture())
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
                 if target == Some(Target::Drag) =>
             {
@@ -572,7 +581,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     crate::symbols_view::draw(
                         frame,
                         Some(symbol),
-                        Point::new(rect.x + 28.0, 12.0),
+                        Point::new(rect.x + 28.0, if tab.identity.compact { 12.0 } else { 8.0 }),
                         16.0,
                         TEXT,
                     );
@@ -593,8 +602,8 @@ impl canvas::Program<Message> for TabStrip<'_> {
                                 18
                             },
                         ),
-                        Point::new(rect.x + name_offset, 12.0),
-                        14.0,
+                        Point::new(rect.x + name_offset, 7.0),
+                        13.0,
                         TEXT,
                         layout.viewport,
                         188.0 - name_offset,
@@ -604,7 +613,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     "Fehler"
                 } else {
                     match tab.state() {
-                        ProcessState::Running => "",
+                        ProcessState::Running => "läuft",
                         ProcessState::Exited(_) => "beendet",
                         ProcessState::Failed(_) => "Fehler",
                     }
@@ -615,30 +624,47 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     .as_ref()
                     .map(|s| s.label())
                     .unwrap_or_default();
-                let mut details = if tab.identity.compact {
-                    if state.is_empty() {
-                        "läuft".into()
-                    } else {
-                        state.into()
-                    }
-                } else if state.is_empty() {
-                    shortcut
-                } else if shortcut.is_empty() {
-                    state.into()
+                let mut details = if tab.identity.compact || shortcut.is_empty() {
+                    format!("PTY {state}")
                 } else {
-                    format!("{state} · {shortcut}")
+                    format!("{shortcut} · PTY {state}")
                 };
                 if tab.pinned {
                     details = format!("PIN · {details}");
+                }
+                let program = &tab.terminal.program_status;
+                let reported = program.summary();
+                let cli = match (program.attention_counts(), reported) {
+                    ((waiting, errors), _) if waiting > 0 && errors > 0 => {
+                        "CLI: Fehler/Wartet".into()
+                    }
+                    (_, Some(record)) => format!("CLI: {}", record.state.label()),
+                    _ => "CLI: —".into(),
+                };
+                if !tab.identity.compact {
+                    let title = if tab.terminal.shell_title.is_empty() {
+                        "Titel: —".into()
+                    } else {
+                        format!("Titel: {}", tab.terminal.shell_title)
+                    };
+                    tab_label(
+                        frame,
+                        ellipsis(&title, 31),
+                        Point::new(rect.x + 28.0, 25.0),
+                        10.0,
+                        MUTED,
+                        layout.viewport,
+                        160.0,
+                    );
                 }
                 tab_label(
                     frame,
                     ellipsis(&details, if tab.identity.compact { 14 } else { 24 }),
                     Point::new(
                         rect.x + if tab.identity.compact { 8.0 } else { 28.0 },
-                        if tab.identity.compact { 36.0 } else { 32.0 },
+                        if tab.identity.compact { 46.0 } else { 43.0 },
                     ),
-                    10.0,
+                    9.0,
                     if state == "Fehler" {
                         Color::from_rgb8(255, 150, 161)
                     } else {
@@ -648,7 +674,23 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     if tab.identity.compact {
                         rect.width - 16.0
                     } else {
-                        160.0
+                        100.0
+                    },
+                );
+                tab_label(
+                    frame,
+                    cli,
+                    Point::new(
+                        rect.x + if tab.identity.compact { 8.0 } else { 132.0 },
+                        if tab.identity.compact { 32.0 } else { 43.0 },
+                    ),
+                    9.0,
+                    reported.map(|r| status_color(r.state)).unwrap_or(MUTED),
+                    layout.viewport,
+                    if tab.identity.compact {
+                        rect.width - 16.0
+                    } else {
+                        84.0
                     },
                 );
                 let close = Layout::close(rect);
@@ -855,7 +897,18 @@ fn label(frame: &mut Frame, content: String, position: Point, size: f32, color: 
     });
 }
 
-fn ellipsis(value: &str, limit: usize) -> String {
+pub(crate) fn status_color(state: hoori_term::program_status::State) -> Color {
+    use hoori_term::program_status::State;
+    match state {
+        State::Idle => MUTED,
+        State::Working => Color::from_rgb8(95, 210, 230),
+        State::Done => Color::from_rgb8(145, 215, 145),
+        State::Blocked => Color::from_rgb8(250, 205, 105),
+        State::Error => Color::from_rgb8(255, 150, 161),
+    }
+}
+
+pub(crate) fn ellipsis(value: &str, limit: usize) -> String {
     if value.width() <= limit {
         return value.into();
     }

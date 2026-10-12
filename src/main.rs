@@ -104,6 +104,9 @@ enum Message {
     Close(hoori_term::tabs::CloseTarget),
     SetPinned(TabId, bool),
     SetCompact(TabId, bool),
+    InspectTab(TabId),
+    HideInspection,
+    InspectionScrolled(f32),
     Select {
         id: hoori_term::tabs::TabId,
         row: usize,
@@ -205,6 +208,8 @@ struct App {
     error: Option<String>,
     confirming: Option<CloseTarget>,
     editing: Option<TabEditor>,
+    inspecting: Option<TabId>,
+    inspection_scroll: f32,
     closing: bool,
     pending_shutdowns: usize,
     strip: tab_strip::State,
@@ -240,6 +245,8 @@ impl App {
             error: None,
             confirming: None,
             editing: None,
+            inspecting: None,
+            inspection_scroll: 0.0,
             closing: false,
             pending_shutdowns: 0,
             strip: tab_strip::State::default(),
@@ -410,6 +417,8 @@ impl App {
             )
         } else if self.templates_open {
             format!("Vorlagen — {title}")
+        } else if self.inspecting.is_some() {
+            format!("Titel/Status — {title}")
         } else if self.launching.is_some() {
             format!("Neue Sitzung — {title}")
         } else {
@@ -549,6 +558,7 @@ impl App {
             return Task::none();
         }
         self.editing = None;
+        self.inspecting = None;
         self.templates_open = false;
         self.launching = None;
         self.strip.focused = None;
@@ -599,6 +609,43 @@ impl App {
         }
         if self.closing {
             return Task::none();
+        }
+        if self.inspecting.is_some() {
+            return match key {
+                Key::Named(Named::Escape | Named::Enter) => self.update(Message::HideInspection),
+                Key::Named(Named::Tab) => {
+                    if modifiers.shift() {
+                        operation::focus_previous()
+                    } else {
+                        operation::focus_next()
+                    }
+                }
+                Key::Named(
+                    Named::Home
+                    | Named::End
+                    | Named::ArrowUp
+                    | Named::ArrowDown
+                    | Named::PageUp
+                    | Named::PageDown,
+                ) => {
+                    self.inspection_scroll = match key {
+                        Key::Named(Named::Home) => 0.0,
+                        Key::Named(Named::End) => 1.0,
+                        Key::Named(Named::ArrowUp) => (self.inspection_scroll - 0.1).max(0.0),
+                        Key::Named(Named::ArrowDown) => (self.inspection_scroll + 0.1).min(1.0),
+                        Key::Named(Named::PageUp) => (self.inspection_scroll - 0.5).max(0.0),
+                        _ => (self.inspection_scroll + 0.5).min(1.0),
+                    };
+                    operation::snap_to(
+                        "runtime-details",
+                        operation::RelativeOffset {
+                            x: 0.0,
+                            y: self.inspection_scroll,
+                        },
+                    )
+                }
+                _ => Task::none(),
+            };
         }
         if self.strip.dragging.is_some() {
             if key == Key::Named(Named::Escape) {
@@ -955,6 +1002,11 @@ impl App {
                     return self.update(Message::Edit(id));
                 }
             }
+            Key::Character(c) if modifiers.is_empty() && c.eq_ignore_ascii_case("i") => {
+                if let Some(Target::Tab(id) | Target::Close(id)) = self.strip.focused {
+                    return self.update(Message::InspectTab(id));
+                }
+            }
             _ => {}
         }
         Task::none()
@@ -963,6 +1015,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         if self.confirming.is_some()
             || self.editing.is_some()
+            || self.inspecting.is_some()
             || self.launching.is_some()
             || self.templates_open
             || self.closing
@@ -978,6 +1031,7 @@ impl App {
                     | Message::SetPinned(..)
                     | Message::SetCompact(..)
                     | Message::Edit(_)
+                    | Message::InspectTab(_)
                     | Message::ShowTemplates
                     | Message::SaveTemplate(_)
                     | Message::Close(_)
@@ -1018,6 +1072,21 @@ impl App {
                     | Message::Event(..)
                     | Message::CancelClose
                     | Message::ConfirmClose
+                    | Message::ShutdownComplete
+            )
+        {
+            return Task::none();
+        }
+        if !storage_message
+            && self.inspecting.is_some()
+            && !matches!(
+                message,
+                Message::Tick(_)
+                    | Message::Resize(..)
+                    | Message::StripWidth(_)
+                    | Message::Event(..)
+                    | Message::HideInspection
+                    | Message::InspectionScrolled(_)
                     | Message::ShutdownComplete
             )
         {
@@ -1089,6 +1158,20 @@ impl App {
                     self.cache.clear();
                 }
             }
+            Message::InspectTab(id) => {
+                if self.tabs.get(id).is_some() {
+                    self.inspecting = Some(id);
+                    self.inspection_scroll = 0.0;
+                    self.strip.hovered = None;
+                    self.cache.clear();
+                    return operation::snap_to("runtime-details", operation::RelativeOffset::START);
+                }
+            }
+            Message::HideInspection => {
+                self.inspecting = None;
+                self.cache.clear();
+            }
+            Message::InspectionScrolled(offset) => self.inspection_scroll = offset,
             Message::Resize(id, size) => {
                 if self.tabs.active == Some(id)
                     && let Some(tab) = self.tabs.get_mut(id)
@@ -1247,6 +1330,7 @@ impl App {
                 }),
                 status,
             ) if self.editing.is_some()
+                || self.inspecting.is_some()
                 || self.templates_open
                 || self.launching.is_some()
                 || status == iced::event::Status::Ignored =>
@@ -1600,7 +1684,7 @@ impl App {
                         ProcessState::Failed(_) => "Startfehler".into(),
                     }
                 };
-                format!(
+                let identity = format!(
                     "{}{} · {shortcut} · {state}{} · {} · Benutzersymbol: {}{}",
                     if close { "Schließen · " } else { "" },
                     tab.description(),
@@ -1620,15 +1704,115 @@ impl App {
                     } else {
                         ""
                     }
-                )
+                );
+                format!("{identity}\nTerminaltitel: {}\n{}\nRechtsklick oder I in der Tableiste: vollständige Titel-/Statusdetails", if tab.terminal.shell_title.is_empty() { "(leer)".into() } else { tab_strip::ellipsis(&tab.terminal.shell_title, 70) }, tab.terminal.program_status.summary_label())
             })
             .unwrap_or_default()
+    }
+
+    fn inspection_view(&self, id: TabId) -> Element<'_, Message> {
+        let Some(tab) = self.tabs.get(id) else {
+            return container(button("Zurück").on_press(Message::HideInspection)).into();
+        };
+        let process = match tab.state() {
+            ProcessState::Running => "läuft".into(),
+            ProcessState::Exited(code) => format!("beendet · Exit {code}"),
+            ProcessState::Failed(error) => format!("Startfehler · {error}"),
+        };
+        let status = &tab.terminal.program_status;
+        let mut fields = column![
+            text(format!("Titel/Status · {}", tab.description())).size(18),
+            text(format!("PTY-Prozess: {process}")).size(13),
+            text(format!(
+                "Terminaltitel: {}",
+                if tab.terminal.shell_title.is_empty() {
+                    "(leer)"
+                } else {
+                    &tab.terminal.shell_title
+                }
+            ))
+            .size(13),
+            text(status.summary_label()).size(13),
+            text(
+                "Vom Programm gemeldete Angaben · keine automatische Aktion · nur für diese Sitzung"
+            )
+            .size(12),
+        ]
+        .spacing(8);
+        if let Some(error) = &tab.error {
+            fields = fields.push(text(format!("PTY-/Eingabefehler: {error}")).size(12));
+        }
+        let mut records: Vec<_> = status.records().collect();
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        for record in records {
+            let source = if record.id.is_empty() {
+                "Hauptmeldung"
+            } else {
+                &record.id
+            };
+            let mut details = column![
+                text(format!(
+                    "{source} · CLI: {}{}",
+                    record.state.label(),
+                    record
+                        .kind
+                        .map(|k| format!(" · {} benötigt", k.label()))
+                        .unwrap_or_default()
+                ))
+                .size(13)
+                .color(tab_strip::status_color(record.state)),
+            ]
+            .spacing(4);
+            if let Some(app) = status.inherited_app(record) {
+                details = details.push(text(format!("Gemeldete Programmkennung: {app}")).size(12));
+            }
+            if let Some(title) = &record.title {
+                details = details.push(text(format!("Bezeichnung: {title}")).size(13));
+            }
+            if let Some(progress) = record.progress {
+                details =
+                    details.push(text(format!("Gemeldeter Fortschritt: {progress}%")).size(12));
+            }
+            if let Some(message) = &record.message {
+                details = details.push(text(format!("Meldung: {message}")).size(13));
+            }
+            fields = fields.push(
+                container(details)
+                    .padding(8)
+                    .width(Fill)
+                    .style(container::rounded_box),
+            );
+        }
+        container(
+            column![
+                scrollable(fields)
+                    .id("runtime-details")
+                    .height(Fill)
+                    .on_scroll(|viewport| Message::InspectionScrolled(
+                        viewport.relative_offset().y
+                    )),
+                row![
+                    text("Mausrad/Pfeile/Bild↑↓/Pos1/Ende · Esc: zurück")
+                        .size(12)
+                        .width(Fill),
+                    button("Zurück zum Terminal").on_press(Message::HideInspection)
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            ]
+            .spacing(8),
+        )
+        .height(self.editor_height())
+        .padding(12)
+        .style(container::rounded_box)
+        .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
         use iced::widget::tooltip;
         let interactive = self.confirming.is_none()
             && self.editing.is_none()
+            && self.inspecting.is_none()
             && self.launching.is_none()
             && !self.templates_open
             && !self.closing;
@@ -1671,7 +1855,7 @@ impl App {
         {
             content = content.push(container(column![
                 text(self.inspect_tab(id, matches!(target, tab_strip::Target::Close(_)))).size(13),
-                text("Pfeile: Details · Alt+Links/Rechts: im Bereich verschieben · C: Ansicht · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
+                text("Pfeile: Vorschau · I: Titel/Status · Alt+Links/Rechts: verschieben · C: Ansicht · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
             ].spacing(4)).padding([6, 10]).width(Fill).style(container::rounded_box));
         }
         let storage_status = if self.templates_loading {
@@ -1702,6 +1886,11 @@ impl App {
                 .on_press_maybe(
                     (interactive && self.templates_loaded)
                         .then(|| self.tabs.active.map(Message::SaveTemplate))
+                        .flatten()
+                ),
+                button(text("Titel/Status").size(12)).on_press_maybe(
+                    interactive
+                        .then(|| self.tabs.active.map(Message::InspectTab))
                         .flatten()
                 ),
                 text(storage_status).size(12).width(Fill),
@@ -1785,6 +1974,9 @@ impl App {
         if self.templates_open {
             content = content.push(self.templates_view());
         }
+        if let Some(id) = self.inspecting {
+            content = content.push(self.inspection_view(id));
+        }
         if let Some(selected) = self.launching {
             let choice = |label: &'static str, index: usize, message: Message| {
                 button(label).on_press(message).style(move |theme, status| {
@@ -1854,7 +2046,7 @@ impl App {
             if let Some(error) = self.error.as_ref().or(tab.error.as_ref()) {
                 content = content.push(container(text(error).size(14)).padding(8));
             }
-            if self.editing.is_none() {
+            if self.editing.is_none() && self.inspecting.is_none() {
                 content = content.push(template_toolbar);
             }
             let status = match tab.state() {
@@ -2668,6 +2860,30 @@ mod tests {
         assert_eq!(app.strip.focused, Some(tab_strip::Target::Tab(second)));
         assert_eq!(app.tabs.active, Some(first));
         assert!(app.inspect_tab(second, false).contains("Logs · 2 · F9"));
+        let before_inspection = app.catalog.clone();
+        let _ = app.keyboard(Key::Character("i".into()), mods, Some("i".into()));
+        assert_eq!(app.inspecting, Some(second));
+        for key in [
+            keyboard::key::Named::Home,
+            keyboard::key::Named::End,
+            keyboard::key::Named::ArrowUp,
+            keyboard::key::Named::PageDown,
+            keyboard::key::Named::F9,
+        ] {
+            let _ = app.keyboard(Key::Named(key), mods, None);
+        }
+        let _ = app.keyboard(Key::Character("x".into()), mods, Some("x".into()));
+        let _ = app.update(Message::Pasted(first, Some("hidden status paste".into())));
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        assert_eq!(app.tabs.active, Some(first));
+        assert_eq!(app.tabs.items.len(), 2);
+        assert_eq!(app.catalog, before_inspection);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        assert!(app.inspecting.is_none());
+        let _ = app.update(Message::InspectTab(first)); // Same target-safe mouse route.
+        assert_eq!(app.inspecting, Some(first));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Enter), mods, None);
+        assert!(app.inspecting.is_none());
         let _ = app.keyboard(Key::Character("c".into()), mods, Some("c".into()));
         assert!(app.tabs.get(second).unwrap().identity.compact);
         assert!(!app.tabs.get(first).unwrap().identity.compact);
@@ -2904,6 +3120,143 @@ mod tests {
         });
         assert_eq!(app.tabs.get(first).unwrap().terminal.shell_title, "data-71");
         assert_eq!(app.tabs.items.len(), 2);
+    }
+
+    #[test]
+    fn runtime_titles_and_statuses_never_change_identity_templates_or_navigation() {
+        use hoori_term::program_status::State;
+        let mut app = app();
+        let first = app.tabs.active.unwrap();
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        let second = app.tabs.active.unwrap();
+        let mods = Modifiers::empty();
+        for (id, name, key) in [
+            (first, "Backend", keyboard::key::Named::F8),
+            (second, "Logs", keyboard::key::Named::F9),
+        ] {
+            app.tabs
+                .configure(
+                    id,
+                    name,
+                    Accent::Green,
+                    Shortcut::capture(&Key::Named(key), mods).unwrap(),
+                )
+                .unwrap();
+        }
+        app.tabs.get_mut(first).unwrap().identity.symbol = Some(Symbol::Star);
+        app.tabs.get_mut(first).unwrap().identity.compact = true;
+        app.tabs.set_pinned(first, true).unwrap();
+        let identity = app.tabs.get(first).unwrap().identity.clone();
+        app.catalog
+            .save_tab(
+                &mut app.tabs,
+                first,
+                Template {
+                    id: TemplateId(0),
+                    identity,
+                    shell: TemplateShell::Bash,
+                    directory: "/tmp".into(),
+                    pinned: true,
+                },
+            )
+            .unwrap();
+        let saved = app.catalog.to_bytes().unwrap();
+        let snapshot = |app: &App| {
+            app.tabs
+                .items
+                .iter()
+                .map(|t| (t.id, t.identity.clone(), t.pinned, t.template))
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot(&app);
+        let full_title = format!("CLI {}", "long-title;界".repeat(32));
+        app.tabs.get_mut(first).unwrap().terminal.feed(format!("\x1b]2;{full_title}\x1b\\\x1b]7501;state=blocked:kind=permission:progress=42:app=fixture\x07\x1b]7501;state=error:id=child\x07").as_bytes());
+        app.tabs
+            .get_mut(second)
+            .unwrap()
+            .terminal
+            .feed(b"\x1b]0;Logs CLI\x07\x1b]7501;state=idle\x07");
+        let _ = app.update(Message::Tick(first));
+        let _ = app.update(Message::Tick(second));
+        assert_eq!(app.tabs.active, Some(second));
+        assert_eq!(
+            app.tabs.get(first).unwrap().terminal.shell_title,
+            full_title
+        );
+        assert_eq!(
+            app.tabs
+                .get(first)
+                .unwrap()
+                .terminal
+                .program_status
+                .attention_counts(),
+            (1, 1)
+        );
+        assert_eq!(
+            app.tabs
+                .get(second)
+                .unwrap()
+                .terminal
+                .program_status
+                .summary()
+                .unwrap()
+                .state,
+            State::Idle
+        );
+        let inspection = app.inspect_tab(first, false);
+        assert!(inspection.contains("Backend · 1 · F8"));
+        assert!(inspection.contains("1 warten, 1 Fehler"));
+        let _ = app.update(Message::InspectTab(first));
+        assert_eq!(app.tabs.active, Some(second));
+        let _ = app.update(Message::HideInspection);
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::F8), mods, None);
+        assert_eq!(app.tabs.active, Some(first));
+        assert!(
+            app.title()
+                .starts_with(&format!("hoori-term [{}", &build_info::COMMIT[..7]))
+        );
+        assert!(app.title().contains("Backend · 1 — CLI"));
+        let _ = app.request_close(CloseTarget::Window);
+        assert_eq!(
+            app.tabs.running_names(CloseTarget::Window),
+            ["Backend · 1", "Logs · 2"]
+        );
+        let _ = app.update(Message::CancelClose);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.catalog.to_bytes().unwrap(), saved);
+        assert_eq!(app.revision, 0);
+        assert!(app.saving.is_none());
+        // Only configuration crosses a restart. Neither terminal title nor any
+        // protocol record can become a property of the restored template.
+        let restored = Catalog::from_bytes(&saved).unwrap();
+        let mut restart = App::new(Options {
+            shell: app.default_shell.program.clone(),
+            args: app.default_shell.args.clone(),
+        });
+        let _ = restart.update(Message::Loaded(Ok(Loaded {
+            catalog: restored,
+            stamp: Some(saved),
+        })));
+        assert_eq!(restart.tabs.items.len(), 1);
+        assert!(
+            restart
+                .tabs
+                .current()
+                .unwrap()
+                .terminal
+                .shell_title
+                .is_empty()
+        );
+        assert!(
+            restart
+                .tabs
+                .current()
+                .unwrap()
+                .terminal
+                .program_status
+                .summary()
+                .is_none()
+        );
     }
 
     #[test]

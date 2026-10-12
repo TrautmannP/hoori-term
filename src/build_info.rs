@@ -3,12 +3,21 @@ pub const DIRTY: bool = matches!(env!("HOORI_DIRTY").as_bytes(), b"true");
 pub const TARGET: &str = env!("HOORI_TARGET");
 
 pub fn sanitize_title(shell_title: &str) -> String {
-    shell_title
+    sanitize_display_text(shell_title)
         .chars()
-        .filter(|c| {
-            !c.is_control() && !matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
         .take(120)
+        .collect()
+}
+
+/// Plain display text only; keep the accepted full title for explicit details.
+pub fn sanitize_display_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}'
+                    | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        })
         .collect()
 }
 
