@@ -2,7 +2,7 @@
 use crate::notifications::Notifications;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,6 +11,20 @@ pub const OUTPUT_CHUNK: usize = 8192;
 pub const OUTPUT_CAPACITY: usize = 64;
 pub const INPUT_CHUNK: usize = 4096;
 pub const INPUT_CAPACITY: usize = 64;
+pub const MAX_WRITE_BYTES: usize = 64 * 1024;
+pub const INPUT_BYTE_CAPACITY: usize = INPUT_CHUNK * INPUT_CAPACITY;
+
+struct InputPacket {
+    bytes: Vec<u8>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+impl Drop for InputPacket {
+    fn drop(&mut self) {
+        self.queued_bytes
+            .fetch_sub(self.bytes.len(), Ordering::Relaxed);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessState {
@@ -22,7 +36,8 @@ pub enum ProcessState {
 pub struct Session {
     pub notifications: Notifications,
     master: Option<Box<dyn MasterPty + Send>>,
-    input: Option<mpsc::SyncSender<Vec<u8>>>,
+    input: Option<mpsc::SyncSender<InputPacket>>,
+    queued_input_bytes: Arc<AtomicUsize>,
     output: Option<mpsc::Receiver<Vec<u8>>>,
     state: Arc<Mutex<ProcessState>>,
     io_error: Arc<Mutex<Option<String>>>,
@@ -67,7 +82,8 @@ impl Session {
         let stopping = Arc::new(AtomicBool::new(false));
         let notifications = Notifications::default();
         let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CAPACITY);
-        let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_CAPACITY);
+        let (input_tx, input_rx) = mpsc::sync_channel::<InputPacket>(INPUT_CAPACITY);
+        let queued_input_bytes = Arc::new(AtomicUsize::new(0));
         let stop = stopping.clone();
         let error = io_error.clone();
         let wakeups = notifications.clone();
@@ -106,7 +122,7 @@ impl Session {
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
-                let mut remaining = bytes.as_slice();
+                let mut remaining = bytes.bytes.as_slice();
                 while !remaining.is_empty() && !stop.load(Ordering::Relaxed) {
                     match writer.write(remaining) {
                         Ok(0) => {
@@ -141,6 +157,7 @@ impl Session {
             notifications,
             master: Some(pair.master),
             input: Some(input_tx),
+            queued_input_bytes,
             output: Some(output_rx),
             state,
             io_error,
@@ -163,13 +180,23 @@ impl Session {
     }
 
     pub fn write(&self, bytes: Vec<u8>) -> Result<(), String> {
-        if bytes.len() > INPUT_CHUNK {
+        if bytes.len() > MAX_WRITE_BYTES {
             return Err("Eingabe überschreitet die Puffergrenze".into());
         }
+        self.queued_input_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |size| {
+                size.checked_add(bytes.len())
+                    .filter(|n| *n <= INPUT_BYTE_CAPACITY)
+            })
+            .map_err(|_| "Eingabepuffer voll; Eingabe wurde nicht gesendet")?;
+        let packet = InputPacket {
+            bytes,
+            queued_bytes: self.queued_input_bytes.clone(),
+        };
         self.input
             .as_ref()
             .ok_or("Sitzung geschlossen")?
-            .try_send(bytes)
+            .try_send(packet)
             .map_err(|e| match e {
                 mpsc::TrySendError::Full(_) => {
                     "Eingabepuffer voll; Eingabe wurde nicht gesendet".into()

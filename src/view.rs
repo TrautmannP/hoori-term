@@ -1,6 +1,8 @@
 use crate::Message;
+use alacritty_terminal::index::Side;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
+use hoori_term::tabs::TabId;
 use hoori_term::terminal::{GridSize, Terminal};
 use iced::widget::canvas::{self, Geometry, Path, Stroke};
 use iced::{Color, Event, Font, Point, Rectangle, Renderer, Size, Theme, mouse};
@@ -12,27 +14,106 @@ const BACKGROUND: Color = Color::from_rgb8(22, 24, 35);
 const FOREGROUND: Color = Color::from_rgb8(220, 224, 235);
 
 pub struct TerminalView<'a> {
+    pub id: TabId,
     pub terminal: &'a Terminal,
     pub cache: &'a canvas::Cache,
+    pub interactive: bool,
+}
+
+#[derive(Default)]
+pub struct ViewState {
+    size: Option<GridSize>,
+    tab: Option<TabId>,
+    selecting: bool,
 }
 
 impl canvas::Program<Message> for TerminalView<'_> {
-    type State = Option<GridSize>;
+    type State = ViewState;
 
     fn update(
         &self,
         state: &mut Self::State,
-        _event: &Event,
+        event: &Event,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
         let size = GridSize::new(
             ((bounds.width - MARGIN * 2.0).max(20.0) / CELL_WIDTH) as u16,
             ((bounds.height - MARGIN * 2.0).max(20.0) / CELL_HEIGHT) as u16,
         );
-        if *state != Some(size) {
-            *state = Some(size);
-            return Some(canvas::Action::publish(Message::Resize(size)));
+        if state.tab != Some(self.id) {
+            state.tab = Some(self.id);
+            state.size = None;
+            state.selecting = false;
+        }
+        if state.size != Some(size) {
+            state.size = Some(size);
+            return Some(canvas::Action::publish(Message::Resize(self.id, size)));
+        }
+        if !self.interactive {
+            state.selecting = false;
+            return None;
+        }
+        let point = || {
+            let position = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+            let x = (position.x - bounds.x - MARGIN)
+                .clamp(0.0, (f32::from(size.columns) * CELL_WIDTH) - 0.01);
+            let y = (position.y - bounds.y - MARGIN)
+                .clamp(0.0, (f32::from(size.rows) * CELL_HEIGHT) - 0.01);
+            (
+                y as usize / CELL_HEIGHT as usize,
+                x as usize / CELL_WIDTH as usize,
+                if x % CELL_WIDTH < CELL_WIDTH / 2.0 {
+                    Side::Left
+                } else {
+                    Side::Right
+                },
+            )
+        };
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                if cursor.is_over(bounds) =>
+            {
+                state.selecting = true;
+                let (row, column, side) = point();
+                return Some(
+                    canvas::Action::publish(Message::Select {
+                        id: self.id,
+                        row,
+                        column,
+                        side,
+                        start: true,
+                    })
+                    .and_capture(),
+                );
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) if state.selecting => {
+                let (row, column, side) = point();
+                return Some(
+                    canvas::Action::publish(Message::Select {
+                        id: self.id,
+                        row,
+                        column,
+                        side,
+                        start: false,
+                    })
+                    .and_capture(),
+                );
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.selecting = false
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let lines = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => (y * 3.0) as i32,
+                    mouse::ScrollDelta::Pixels { y, .. } => (y / CELL_HEIGHT).round() as i32,
+                };
+                return Some(
+                    canvas::Action::publish(Message::Scroll(self.id, lines)).and_capture(),
+                );
+            }
+            Event::Window(iced::window::Event::Unfocused) => state.selecting = false,
+            _ => {}
         }
         None
     }
@@ -58,14 +139,22 @@ impl canvas::Program<Message> for TerminalView<'_> {
                     continue;
                 }
                 let cell = indexed.cell;
-                let background = color(
-                    if cell.flags.contains(Flags::INVERSE) {
-                        cell.fg
-                    } else {
-                        cell.bg
-                    },
-                    content.colors,
-                );
+                let selected = content
+                    .selection
+                    .as_ref()
+                    .is_some_and(|s| s.contains(indexed.point));
+                let background = if selected {
+                    Color::from_rgb8(62, 87, 139)
+                } else {
+                    color(
+                        if cell.flags.contains(Flags::INVERSE) {
+                            cell.fg
+                        } else {
+                            cell.bg
+                        },
+                        content.colors,
+                    )
+                };
                 if background != BACKGROUND {
                     frame.fill_rectangle(
                         Point::new(
