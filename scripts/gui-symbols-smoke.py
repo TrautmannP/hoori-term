@@ -390,7 +390,9 @@ finally:
             assert track(w) == before
             snapshot('02-before-restart.json')
             close(w, cancel=True, image='08-window-close-names-symbol-tabs-and-pins.png')
-            report['explicit_save_no_spawn_linked_auto_save_close_keeps_template_reopen_once'] = True
+            report['close_keeps_template_and_deliberate_reopen_once'] = True
+            if not (args.resume_live_after_resize or args.resume_live_storage):
+                report['explicit_save_without_spawn_and_linked_auto_save'] = True
             phase('live-selection-storage-routing-and-lifecycle')
 
         if args.only in ['all', 'restart']:
