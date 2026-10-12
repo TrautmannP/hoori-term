@@ -259,6 +259,49 @@ impl Tabs {
         self.items.iter().take_while(|tab| tab.pinned).count()
     }
 
+    /// Resolve both stable identities before calculating a destination. A
+    /// stale target must never be replaced by the next positional tab.
+    pub fn move_destination(
+        &self,
+        source: TabId,
+        target: TabId,
+        after: bool,
+    ) -> Result<usize, String> {
+        let from = self
+            .items
+            .iter()
+            .position(|tab| tab.id == source)
+            .ok_or("Der zu verschiebende Tab ist nicht mehr geöffnet")?;
+        let to = self
+            .items
+            .iter()
+            .position(|tab| tab.id == target)
+            .ok_or("Der Zieltab ist nicht mehr geöffnet")?;
+        if self.items[from].pinned != self.items[to].pinned {
+            return Err(
+                "Tabs lassen sich nur innerhalb ihres Pin-/Normalbereichs verschieben".into(),
+            );
+        }
+        if from == to {
+            return Ok(from);
+        }
+        let insertion = to + usize::from(after);
+        Ok(insertion - usize::from(from < insertion))
+    }
+
+    /// Move the existing value, retaining the active identity, transport and
+    /// terminal. Both mouse and keyboard actions use this same operation.
+    pub fn move_tab(&mut self, source: TabId, target: TabId, after: bool) -> Result<bool, String> {
+        let destination = self.move_destination(source, target, after)?;
+        let from = self.items.iter().position(|tab| tab.id == source).unwrap();
+        if from == destination {
+            return Ok(false);
+        }
+        let tab = self.items.remove(from);
+        self.items.insert(destination, tab);
+        Ok(true)
+    }
+
     /// Move only the changed tab to the end of its destination group. Moving
     /// the existing value preserves its transport, identity and terminal.
     pub fn set_pinned(&mut self, id: TabId, pinned: bool) -> Result<(), String> {

@@ -167,3 +167,84 @@ fn pin_groups_move_only_the_target_and_normal_close_cannot_remove_it() {
     tabs.remove(CloseTarget::Window);
     assert!(tabs.items.is_empty()); // Window close deliberately includes pins.
 }
+
+#[test]
+fn free_moves_preserve_identity_and_active_tab_and_reject_stale_or_cross_group_targets() {
+    let mut tabs = Tabs::default();
+    let ids: Vec<_> = (0..12).map(|_| open(&mut tabs)).collect();
+    for (index, id) in ids.iter().copied().enumerate() {
+        tabs.configure(id, &format!("Tab {index}"), Accent::Green, None)
+            .unwrap();
+        let tab = tabs.get_mut(id).unwrap();
+        tab.identity.compact = index % 2 == 0;
+        tab.identity.symbol = Some(hoori_term::symbols::Symbol::Star);
+        tab.terminal
+            .feed(format!("retained-{index}\x1b]2;title-{index}\x07").as_bytes());
+        if index < 4 {
+            tabs.set_pinned(id, true).unwrap();
+        }
+    }
+    tabs.get_mut(ids[1]).unwrap().identity.shortcut =
+        Some(shortcut(Key::Named(Named::F8), Modifiers::empty()));
+    let identities: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            let tab = tabs.get(*id).unwrap();
+            (
+                *id,
+                tab.identity.clone(),
+                tab.pinned,
+                tab.template,
+                tab.terminal.shell_title.clone(),
+                tab.state(),
+            )
+        })
+        .collect();
+    let order = |tabs: &Tabs| tabs.items.iter().map(|tab| tab.id).collect::<Vec<_>>();
+    assert!(tabs.move_tab(ids[3], ids[0], false).unwrap());
+    assert!(tabs.move_tab(ids[5], ids[10], true).unwrap());
+    assert_eq!(
+        order(&tabs),
+        [
+            ids[3], ids[0], ids[1], ids[2], ids[4], ids[6], ids[7], ids[8], ids[9], ids[10],
+            ids[5], ids[11]
+        ]
+    );
+    let before = order(&tabs);
+    for (source, target, after) in [
+        (ids[3], ids[0], false),
+        (ids[3], ids[3], true),
+        (ids[5], ids[10], true),
+    ] {
+        assert!(!tabs.move_tab(source, target, after).unwrap());
+        assert_eq!(order(&tabs), before);
+    }
+    for (source, target) in [(ids[1], ids[5]), (TabId(999), ids[1]), (ids[1], TabId(999))] {
+        assert!(tabs.move_tab(source, target, false).is_err());
+        assert_eq!(order(&tabs), before);
+    }
+    assert_eq!(tabs.active, Some(ids[11]));
+    assert_eq!(
+        tabs.shortcut_target(&Key::Named(Named::F8), Modifiers::empty()),
+        Some(ids[1])
+    );
+    for (id, identity, pinned, template, title, state) in identities {
+        let tab = tabs.get(id).unwrap();
+        assert_eq!(
+            (
+                &tab.identity,
+                tab.pinned,
+                tab.template,
+                &tab.terminal.shell_title,
+                tab.state()
+            ),
+            (&identity, pinned, template, &title, state)
+        );
+    }
+    tabs.remove(CloseTarget::Tab(ids[10]));
+    let after_close = order(&tabs);
+    assert!(tabs.move_tab(ids[5], ids[10], false).is_err());
+    assert_eq!(order(&tabs), after_close); // Never falls back to the old positional neighbor.
+    tabs.remove(CloseTarget::Tab(ids[5]));
+    assert!(tabs.move_tab(ids[5], ids[11], true).is_err());
+}

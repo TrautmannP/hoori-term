@@ -84,6 +84,285 @@ fn identity(
     }
 }
 
+fn ordered_fixture(count: usize) -> (Tabs, Catalog, Vec<TabId>, Vec<TemplateId>) {
+    let mut tabs = Tabs::default();
+    let mut catalog = Catalog::default();
+    let live: Vec<_> = (0..count).map(|_| model_tab(&mut tabs)).collect();
+    let saved = live
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let mut template = draft(
+                &format!("Saved {index}"),
+                Named::F8,
+                "/nonexistent/hoo26-order",
+            );
+            template.identity.shortcut = None;
+            template.identity.symbol = Some(Symbol::Star);
+            template.identity.compact = index % 2 == 0;
+            catalog.save_tab(&mut tabs, *tab, template).unwrap()
+        })
+        .collect();
+    (tabs, catalog, live, saved)
+}
+
+#[test]
+fn template_order_changes_only_the_moved_link_with_closed_neighbors_and_first_save() {
+    let (mut tabs, mut catalog, live, saved) = ordered_fixture(6);
+    for index in [0, 2, 4] {
+        catalog.set_pinned(&mut tabs, live[index], true).unwrap();
+    }
+    tabs.remove(CloseTarget::PinnedTab(live[2]));
+    tabs.remove(CloseTarget::Tab(live[3]));
+    let ordinary = model_tab(&mut tabs);
+    let other = model_tab(&mut tabs);
+    let active = tabs.active;
+    let ids = |tabs: &Tabs| tabs.items.iter().map(|tab| tab.id).collect::<Vec<_>>();
+    assert!(
+        catalog
+            .move_tab(&mut tabs, live[4], live[0], false)
+            .unwrap()
+    );
+    assert_eq!(
+        catalog.order(),
+        [saved[4], saved[0], saved[1], saved[2], saved[3], saved[5]]
+    );
+    assert!(catalog.move_tab(&mut tabs, live[1], live[5], true).unwrap());
+    assert_eq!(
+        catalog.order(),
+        [saved[4], saved[0], saved[2], saved[3], saved[5], saved[1]]
+    );
+    assert!(
+        catalog
+            .move_tab(&mut tabs, live[1], live[5], false)
+            .unwrap()
+    );
+    assert_eq!(
+        catalog.order(),
+        [saved[4], saved[0], saved[2], saved[3], saved[1], saved[5]]
+    );
+    let before = catalog.clone();
+    assert!(
+        !catalog
+            .move_tab(&mut tabs, ordinary, live[5], false)
+            .unwrap()
+    );
+    assert_eq!(catalog, before); // Temporary tabs never become durable anchors.
+    assert!(
+        !catalog
+            .move_tab(&mut tabs, live[1], ordinary, false)
+            .unwrap()
+    ); // Same live position.
+    assert_eq!(catalog, before);
+    let live_before_save = ids(&tabs);
+    let new = catalog
+        .save_tab(
+            &mut tabs,
+            ordinary,
+            draft("First save", Named::F8, "/nonexistent/hoo26-order"),
+        )
+        .unwrap();
+    assert_eq!(
+        catalog.order(),
+        [
+            saved[4], saved[0], saved[2], saved[3], saved[1], new, saved[5]
+        ]
+    );
+    assert_eq!(ids(&tabs), live_before_save);
+    assert_eq!(tabs.active, active);
+    assert_eq!(
+        catalog.shortcut_target(&Key::Named(Named::F8), Modifiers::empty()),
+        Some(new)
+    );
+    // No other linked tab in the pin group: moving around an ordinary tab
+    // does not invent a saved position or move an entry from the other group.
+    tabs.remove(CloseTarget::PinnedTab(live[0]));
+    tabs.set_pinned(other, true).unwrap();
+    let before = catalog.clone();
+    assert!(!catalog.move_tab(&mut tabs, live[4], other, true).unwrap());
+    assert_eq!(catalog, before);
+    let live_before = ids(&tabs);
+    assert!(
+        catalog
+            .move_tab(&mut tabs, live[4], live[5], false)
+            .is_err()
+    );
+    assert!(
+        catalog
+            .move_tab(&mut tabs, ordinary, live[3], true)
+            .is_err()
+    );
+    assert_eq!(ids(&tabs), live_before);
+    assert_eq!(catalog, before);
+    let order_before = catalog.order().to_vec();
+    catalog.set_pinned(&mut tabs, ordinary, true).unwrap();
+    catalog.set_pinned(&mut tabs, ordinary, false).unwrap();
+    assert_eq!(catalog.order(), order_before); // Pin changes are a distinct action.
+    let before_remove = ids(&tabs);
+    let identity = tabs.get(ordinary).unwrap().identity.clone();
+    catalog.remove(&mut tabs, new).unwrap();
+    assert_eq!(ids(&tabs), before_remove);
+    let tab = tabs.get(ordinary).unwrap();
+    assert!(tab.template.is_none() && tab.identity.shortcut.is_none());
+    assert_eq!(
+        (
+            &tab.identity.name,
+            tab.identity.symbol,
+            tab.identity.compact,
+            tab.pinned
+        ),
+        (&identity.name, identity.symbol, identity.compact, false)
+    );
+    let before_close = catalog.clone();
+    tabs.remove(CloseTarget::Tab(live[5]));
+    assert_eq!(catalog, before_close);
+    assert_eq!(
+        Catalog::from_bytes(&catalog.to_bytes().unwrap()).unwrap(),
+        catalog
+    );
+}
+
+#[test]
+fn explicit_reopen_follows_saved_order_within_each_group_and_preserves_existing_tabs() {
+    let (mut tabs, mut catalog, live, saved) = ordered_fixture(6);
+    for index in [0, 2, 4] {
+        catalog.set_pinned(&mut tabs, live[index], true).unwrap();
+    }
+    catalog
+        .move_tab(&mut tabs, live[4], live[0], false)
+        .unwrap();
+    catalog.move_tab(&mut tabs, live[1], live[5], true).unwrap();
+    assert_eq!(
+        catalog.order(),
+        [saved[4], saved[0], saved[2], saved[3], saved[5], saved[1]]
+    );
+    let catalog = Catalog::from_bytes(&catalog.to_bytes().unwrap()).unwrap();
+    for sequence in [vec![1, 5, 3, 2, 0, 4], vec![4, 3, 0, 1, 2, 5]] {
+        let mut restarted = Tabs::default();
+        let ordinary = model_tab(&mut restarted);
+        assert_eq!(restarted.items.len(), 1); // Loading configuration never starts a template.
+        let mut opened = Vec::new();
+        for index in sequence {
+            let before: Vec<_> = restarted.items.iter().map(|tab| tab.id).collect();
+            let new = catalog
+                .open(&mut restarted, saved[index], GridSize::new(80, 24))
+                .unwrap();
+            assert_eq!(
+                restarted
+                    .items
+                    .iter()
+                    .filter(|tab| tab.id != new)
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>(),
+                before
+            );
+            opened.push(new);
+        }
+        let links: Vec<_> = restarted.items.iter().map(|tab| tab.template).collect();
+        assert_eq!(
+            links,
+            [
+                Some(saved[4]),
+                Some(saved[0]),
+                Some(saved[2]),
+                None,
+                Some(saved[3]),
+                Some(saved[5]),
+                Some(saved[1])
+            ]
+        );
+        assert_eq!(restarted.items[3].id, ordinary);
+        let before: Vec<_> = restarted.items.iter().map(|tab| tab.id).collect();
+        let count = before.len();
+        let again = catalog
+            .open(&mut restarted, saved[0], GridSize::new(111, 35))
+            .unwrap();
+        assert_eq!(restarted.active, Some(again));
+        assert_eq!(restarted.items.len(), count);
+        assert_eq!(
+            restarted.items.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(
+            restarted.get(again).unwrap().terminal.size,
+            GridSize::new(80, 24)
+        );
+        assert!(matches!(
+            restarted.get(again).unwrap().state(),
+            ProcessState::Failed(_)
+        ));
+    }
+}
+
+#[test]
+fn saved_id_order_loads_legacy_rejects_bad_files_and_recovers_from_failed_atomic_write() {
+    let fixture = Fixture::new();
+    let file = fixture.file();
+    let (mut tabs, mut catalog, live, saved) = ordered_fixture(3);
+    let first = file.save(&catalog, None).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&first.stamp).unwrap();
+    legacy.as_object_mut().unwrap().remove("order");
+    legacy["items"].as_array_mut().unwrap().swap(0, 2);
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&file.path, &bytes).unwrap();
+    let loaded = file.load().unwrap();
+    assert_eq!(loaded.catalog.order(), [saved[2], saved[1], saved[0]]);
+    assert_eq!(
+        loaded
+            .catalog
+            .ordered()
+            .map(Template::name)
+            .collect::<Vec<_>>(),
+        ["Saved 2", "Saved 1", "Saved 0"]
+    );
+    assert_eq!(fs::read(&file.path).unwrap(), bytes);
+    for invalid in [
+        serde_json::json!(null),
+        serde_json::json!(42),
+        serde_json::json!([]),
+        serde_json::json!([1, 2]),
+        serde_json::json!([1, 1, 3]),
+        serde_json::json!([1, 2, 999]),
+        serde_json::json!([1, 2, "3"]),
+        serde_json::json!([1, 2, -3]),
+        serde_json::json!([1, 2, 3, 4]),
+    ] {
+        legacy["order"] = invalid;
+        let broken = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&file.path, &broken).unwrap();
+        assert!(file.load().is_err());
+        assert!(file.save(&catalog, None).is_err());
+        assert_eq!(fs::read(&file.path).unwrap(), broken);
+    }
+    fs::write(&file.path, &first.stamp).unwrap();
+    assert!(
+        catalog
+            .move_tab(&mut tabs, live[2], live[0], false)
+            .unwrap()
+    );
+    assert_eq!(catalog.order(), [saved[2], saved[0], saved[1]]);
+    let lock = file.path.with_extension("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(file.save(&catalog, Some(&first.stamp)).is_err());
+    assert_eq!(fs::read(&file.path).unwrap(), first.stamp);
+    fs::remove_dir(&lock).unwrap();
+    let retry = file.save(&catalog, Some(&first.stamp)).unwrap();
+    assert_eq!(
+        file.load().unwrap().catalog.order(),
+        [saved[2], saved[0], saved[1]]
+    );
+    assert_ne!(retry.stamp, first.stamp);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
 #[test]
 fn linked_identity_changes_and_removal_never_touch_terminal_or_process() {
     let mut tabs = Tabs::default();

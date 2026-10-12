@@ -30,12 +30,28 @@ pub enum Target {
     Drag,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DropTarget {
+    pub tab: TabId,
+    pub after: bool,
+}
+
+pub struct TabDrag {
+    pub source: TabId,
+    pub origin: Point,
+    pub moved: bool,
+    pub target: Option<DropTarget>,
+}
+
 #[derive(Default)]
 pub struct State {
     pub width: f32,
     pub offset: f32,
     pub focused: Option<Target>,
     pub hovered: Option<Target>,
+    // The app owns this gesture so changing/removing a tooltip cannot reset
+    // a held pointer. Targets are cached IDs, never positions on release.
+    pub dragging: Option<TabDrag>,
 }
 
 impl State {
@@ -210,6 +226,24 @@ impl Layout {
         }
         self.drag.contains(point).then_some(Target::Drag)
     }
+
+    fn drop_target(
+        &self,
+        tabs: &Tabs,
+        offset: f32,
+        source: TabId,
+        point: Point,
+    ) -> Option<DropTarget> {
+        let (Target::Tab(id) | Target::Close(id)) = self.hit(tabs, offset, point)? else {
+            return None;
+        };
+        let from = tabs.get(source)?;
+        let index = tabs.items.iter().position(|tab| tab.id == id)?;
+        (from.pinned == tabs.items[index].pinned).then_some(DropTarget {
+            tab: id,
+            after: point.x >= self.tab(index, offset).center_x(),
+        })
+    }
 }
 
 pub struct TabStrip<'a> {
@@ -257,10 +291,15 @@ impl canvas::Program<Message> for TabStrip<'_> {
         ) {
             pointer.pressed = None;
             pointer.click = None;
+            if self.state.dragging.is_some() {
+                return Some(canvas::Action::publish(Message::CancelTabDrag));
+            }
         }
         if pointer.width != bounds.width {
             pointer.width = bounds.width;
-            return Some(canvas::Action::publish(Message::StripWidth(bounds.width)));
+            if self.state.width != bounds.width {
+                return Some(canvas::Action::publish(Message::StripWidth(bounds.width)));
+            }
         }
         if !self.interactive && !self.window_interactive {
             pointer.pressed = None;
@@ -276,6 +315,57 @@ impl canvas::Program<Message> for TabStrip<'_> {
             .is_some_and(|pressed| !self.enabled(pressed))
         {
             pointer.pressed = None;
+        }
+        if let Some(drag) = &self.state.dragging {
+            return match event {
+                Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                    let point = cursor.position_in(bounds);
+                    let moved =
+                        drag.moved || point.is_some_and(|point| drag.origin.distance(point) >= 6.0);
+                    let target = moved
+                        .then(|| {
+                            point.and_then(|p| {
+                                layout.drop_target(self.tabs, self.state.offset, drag.source, p)
+                            })
+                        })
+                        .flatten();
+                    Some(if moved != drag.moved || target != drag.target {
+                        canvas::Action::publish(Message::PreviewTabDrag(drag.source, target, moved))
+                            .and_capture()
+                    } else {
+                        canvas::Action::capture()
+                    })
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    let valid = if drag.moved {
+                        cursor
+                            .position_in(bounds)
+                            .and_then(|p| {
+                                layout.drop_target(self.tabs, self.state.offset, drag.source, p)
+                            })
+                            .is_some()
+                    } else {
+                        target == Some(Target::Tab(drag.source))
+                    };
+                    Some(
+                        canvas::Action::publish(Message::FinishTabDrag(drag.source, valid))
+                            .and_capture(),
+                    )
+                }
+                Event::Mouse(mouse::Event::WheelScrolled { delta })
+                    if cursor
+                        .position_in(bounds)
+                        .is_some_and(|p| p.x < layout.drag.x) =>
+                {
+                    let delta = match delta {
+                        mouse::ScrollDelta::Lines { x, y } => -(x + y) * 80.0,
+                        mouse::ScrollDelta::Pixels { x, y } => -(x + y),
+                    };
+                    Some(canvas::Action::publish(Message::StripScroll(delta)).and_capture())
+                }
+                Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(canvas::Action::capture()),
+                _ => None,
+            };
         }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
@@ -314,6 +404,22 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 } else {
                     canvas::Action::capture()
                 })
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                if matches!(target, Some(Target::Tab(_))) =>
+            {
+                let Some(Target::Tab(source)) = target else {
+                    unreachable!()
+                };
+                pointer.pressed = None;
+                pointer.click = None;
+                Some(
+                    canvas::Action::publish(Message::BeginTabDrag(
+                        source,
+                        cursor.position_in(bounds).unwrap(),
+                    ))
+                    .and_capture(),
+                )
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if target.is_some() => {
                 pointer.pressed = target;
@@ -363,7 +469,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if pointer.pressed == Some(Target::Drag) {
+        if pointer.pressed == Some(Target::Drag) || self.state.dragging.is_some() {
             return mouse::Interaction::Grabbing;
         }
         match cursor
@@ -570,6 +676,31 @@ impl canvas::Program<Message> for TabStrip<'_> {
                 } else if self.state.focused == Some(Target::Close(tab.id)) {
                     focus(frame, close);
                 }
+                if self
+                    .state
+                    .dragging
+                    .as_ref()
+                    .is_some_and(|drag| drag.source == tab.id)
+                {
+                    focus(
+                        frame,
+                        Rectangle::new(
+                            Point::new(rect.x + 2.0, 10.0),
+                            Size::new(rect.width - 4.0, 40.0),
+                        ),
+                    );
+                }
+            }
+            if let Some(drop) = self.state.dragging.as_ref().and_then(|drag| drag.target)
+                && let Some(index) = self.tabs.items.iter().position(|tab| tab.id == drop.tab)
+            {
+                let rect = layout.tab(index, self.state.offset);
+                let x = if drop.after {
+                    rect.x + rect.width - 2.0
+                } else {
+                    rect.x
+                };
+                frame.fill_rectangle(Point::new(x, 10.0), Size::new(3.0, 40.0), FOCUS);
             }
         });
         for (target, rect, content) in layout.controls() {
@@ -1032,5 +1163,159 @@ mod tests {
             layout.hit(&tabs, state.offset, layout.tab(11, state.offset).center()),
             Some(Target::Tab(target))
         );
+    }
+
+    #[test]
+    fn drag_geometry_uses_stable_targets_and_gestures_survive_tooltip_reset_and_overflow() {
+        let mut tabs = Tabs::default();
+        let shell = Shell {
+            program: "/nonexistent/hoo26-drag".into(),
+            args: vec![],
+            directory: None,
+        };
+        let ids: Vec<_> = (0..12)
+            .map(|index| {
+                let id = tabs.open(&shell, GridSize::new(80, 24)).unwrap();
+                tabs.get_mut(id).unwrap().identity.compact = index % 2 == 0;
+                if index < 3 {
+                    tabs.set_pinned(id, true).unwrap();
+                }
+                id
+            })
+            .collect();
+        for width in [640.0, 1280.0] {
+            let mut state = State {
+                width,
+                ..Default::default()
+            };
+            let layout = state.layout(&tabs);
+            for (source, target) in [(ids[0], ids[2]), (ids[4], ids[11])] {
+                state.reveal(&tabs, target);
+                let index = tabs.items.iter().position(|tab| tab.id == target).unwrap();
+                let rect = layout.tab(index, state.offset);
+                for (x, after) in [(rect.x + 12.0, false), (rect.x + rect.width - 12.0, true)] {
+                    assert_eq!(
+                        layout.drop_target(&tabs, state.offset, source, Point::new(x, 35.0)),
+                        Some(DropTarget { tab: target, after })
+                    );
+                }
+                let other_group = if source == ids[0] { ids[4] } else { ids[0] };
+                assert!(
+                    layout
+                        .drop_target(&tabs, state.offset, other_group, rect.center())
+                        .is_none()
+                );
+            }
+            for (_, rect, _) in layout.controls() {
+                assert!(
+                    layout
+                        .drop_target(&tabs, state.offset, ids[4], rect.center())
+                        .is_none()
+                );
+            }
+            assert!(
+                layout
+                    .drop_target(&tabs, state.offset, ids[4], Point::new(100.0, 70.0))
+                    .is_none()
+            );
+            state.reveal(&tabs, ids[0]);
+            let origin = Point::new(layout.tab(0, state.offset).x + 16.0, 28.0);
+            let bounds = Rectangle::new(Point::ORIGIN, Size::new(width, HEIGHT));
+            let mut pointer = PointerState {
+                width,
+                ..Default::default()
+            };
+            let strip = TabStrip {
+                tabs: &tabs,
+                state: &state,
+                interactive: true,
+                window_interactive: true,
+                maximized: false,
+            };
+            let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+            let message = strip
+                .update(
+                    &mut pointer,
+                    &press,
+                    bounds,
+                    mouse::Cursor::Available(origin),
+                )
+                .unwrap()
+                .into_inner()
+                .0;
+            assert!(
+                matches!(message,Some(Message::BeginTabDrag(id,point)) if id == ids[0] && point == origin)
+            );
+            assert!(pointer.pressed.is_none()); // Escape cannot later turn a release into an activation.
+            state.dragging = Some(TabDrag {
+                source: ids[0],
+                origin,
+                moved: false,
+                target: None,
+            });
+            // Removing an already-open tooltip resets the canvas-local state.
+            pointer = PointerState::default();
+            let strip = TabStrip {
+                tabs: &tabs,
+                state: &state,
+                interactive: true,
+                window_interactive: true,
+                maximized: false,
+            };
+            let motion = Event::Mouse(mouse::Event::CursorMoved { position: origin });
+            let action = strip
+                .update(
+                    &mut pointer,
+                    &motion,
+                    bounds,
+                    mouse::Cursor::Available(Point::new(origin.x + 2.0, origin.y)),
+                )
+                .unwrap()
+                .into_inner();
+            assert!(action.0.is_none()); // Below threshold, no preview and no width/cancel message.
+            let point = Point::new(origin.x + 8.0, origin.y);
+            assert!(
+                matches!(strip.update(&mut pointer,&motion,bounds,mouse::Cursor::Available(point)).unwrap().into_inner().0,Some(Message::PreviewTabDrag(id,Some(DropTarget { tab, after:false }),true)) if id == ids[0] && tab == ids[0])
+            );
+            assert!(
+                matches!(strip.update(&mut pointer,&Event::Mouse(mouse::Event::WheelScrolled { delta:mouse::ScrollDelta::Lines { x:0.0,y:-3.0 } }),bounds,mouse::Cursor::Available(origin)).unwrap().into_inner().0,Some(Message::StripScroll(delta)) if delta == 240.0)
+            );
+            assert!(matches!(
+                strip
+                    .update(
+                        &mut pointer,
+                        &Event::Window(iced::window::Event::Unfocused),
+                        bounds,
+                        mouse::Cursor::Available(origin)
+                    )
+                    .unwrap()
+                    .into_inner()
+                    .0,
+                Some(Message::CancelTabDrag)
+            ));
+            // A cached ID is retained even if its old slot now contains a
+            // different tab. The app will reject it when applying the drop.
+            let cached = DropTarget {
+                tab: ids[1],
+                after: true,
+            };
+            state.dragging = Some(TabDrag {
+                source: ids[0],
+                origin,
+                moved: true,
+                target: Some(cached),
+            });
+            let strip = TabStrip {
+                tabs: &tabs,
+                state: &state,
+                interactive: true,
+                window_interactive: true,
+                maximized: false,
+            };
+            assert!(
+                matches!(strip.update(&mut pointer,&Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),bounds,mouse::Cursor::Available(Point::new(100.0,70.0))).unwrap().into_inner().0,Some(Message::FinishTabDrag(id,false)) if id == ids[0])
+            );
+            assert_eq!(state.dragging.as_ref().unwrap().target, Some(cached));
+        }
     }
 }
