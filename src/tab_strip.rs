@@ -716,8 +716,8 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     focus(
                         frame,
                         Rectangle::new(
-                            Point::new(rect.x + 4.0, 12.0),
-                            Size::new(rect.width - 8.0, 36.0),
+                            Point::new(rect.x + 4.0, 4.0),
+                            Size::new(rect.width - 8.0, HEIGHT - 6.0),
                         ),
                     );
                 } else if self.state.focused == Some(Target::Close(tab.id)) {
