@@ -13,6 +13,8 @@ Each tab can independently use a compact symbol view; pinning stays a separate
 property. Saved templates retain the selected presentation.
 Tabs can be reordered within their pin/ordinary group. Linked tabs carry the
 saved template order; ordinary tabs remain temporary.
+Dynamic terminal titles and explicitly reported program status complement the
+own tab identity. Their runtime values are never saved in templates.
 
 ## Run
 
@@ -36,6 +38,7 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | New session using the launch shell/arguments | Ctrl+Shift+T |
 | New Bash session | Ctrl+Shift+B |
 | Focus the tab strip / window controls | Ctrl+Shift+L |
+| Inspect full terminal title / reported status | Right-click a tab; or Ctrl+Shift+L, focus a tab, I; **Titel/Status** for the active tab |
 | Reorder a tab within its pin/ordinary group | Drag its body; or Ctrl+Shift+L, focus a tab, Alt+Left/Right |
 | Move / maximize or restore window | Drag / double-click the dotted build-hash area |
 | Resize window | Drag a window edge or corner |
@@ -79,6 +82,11 @@ focus details or the editor show the full name. Compact tabs show the chosen
 symbol, accent, process state and PIN separately. With no chosen symbol, a neutral
 Terminal drawing is used only for display; no symbol setting is added. Compact
 presentation never follows overflow or pinning automatically.
+Normal tabs add a title preview and separate `CLI:`/`PTY` labels. Compact tabs
+retain their width and separate status lines. Only explicit OSC 7501 reports
+produce CLI states; a title alone does not. Full details scroll with the mouse,
+arrows, PageUp/PageDown or Home/End; Escape/Enter returns to terminal input.
+See [the bounded protocol and lifecycle rules](docs/hoo-29-title-status.md).
 Scroll arrows and the mouse wheel move overflowing tabs;
 the Plus target stays available. Direct navigation reveals its target.
 With strip focus, arrows/Home/End move focus, Tab/Shift+Tab traverse tab/close/Plus

@@ -209,7 +209,8 @@ impl Tab {
                 self.error = Some(error);
             }
         }
-        consumed > 0
+        let status_changed = self.state() != ProcessState::Running && self.terminal.process_ended();
+        consumed > 0 || status_changed
     }
 
     pub fn resize(&mut self, size: GridSize) {
