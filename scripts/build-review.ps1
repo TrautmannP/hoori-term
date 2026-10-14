@@ -37,7 +37,7 @@ foreach ($candidate in @($staging, $destination)) {
         throw 'Review artifact escaped its build root.'
     }
 }
-Move-Item -LiteralPath $staging -Destination $destination
+[IO.Directory]::Move($staging, $destination)
 Write-Output "Review build: $destination"
 Write-Output "Launch: $destination\hoori-term.lnk"
 Write-Output "Command: & '$destination\launch.ps1'"

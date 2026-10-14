@@ -2627,6 +2627,24 @@ mod windows_tests {
         assert_eq!(app.tabs.active, id);
         assert_eq!(app.tabs.items.len(), 1);
     }
+
+    #[test]
+    fn supported_default_launches_its_exact_distribution_once() {
+        let mut inventory = hoori_term::launch::parse(
+            "Ubuntu Test\nOther",
+            "* Ubuntu Test Running 2\nOther Stopped 2",
+        )
+        .unwrap();
+        // Observe the selected spawn configuration without running a shell.
+        inventory.choices[0].shell.program = "C:\\hoori-nonexistent-model-shell.exe".into();
+        let mut app = empty();
+        let _ = app.update(Message::LaunchesLoaded(inventory.clone(), true));
+        assert_eq!(app.tabs.items.len(), 1);
+        assert_eq!(app.tabs.current().unwrap().shell.args[1], "Ubuntu Test");
+        assert!(app.launching.is_none());
+        let _ = app.update(Message::LaunchesLoaded(inventory, true));
+        assert_eq!(app.tabs.items.len(), 1);
+    }
 }
 
 #[cfg(all(test, unix))]

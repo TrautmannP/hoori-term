@@ -38,10 +38,13 @@ cargo run --locked
 cargo run --locked -- --shell C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -- -NoLogo
 ```
 
-Prerequisites: Rust 1.98.1 (pinned by `rust-toolchain.toml`), a C linker,
+Native Windows development needs the pinned Rust MSVC toolchain and Visual C++
+build tools. The review executable itself does not require Rust.
+
+Ubuntu prerequisites: Rust 1.98.1 (pinned by `rust-toolchain.toml`), a C linker,
 Ubuntu desktop with X11 or Wayland libraries and a working Vulkan/OpenGL driver,
 monospace fonts, and zsh (`/usr/bin/zsh`). The verified environment is Ubuntu
-24.04.5 x86_64 with X11; Wayland and Windows runtime checks remain pending.
+24.04.5 x86_64 with X11; native Wayland and the full Windows matrix remain pending.
 
 ```sh
 cargo run --locked
