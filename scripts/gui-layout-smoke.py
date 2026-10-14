@@ -86,9 +86,10 @@ def words(w):
     w.focus()
     png = subprocess.run(['import', '-window', w.id, 'png:-'], check=True,
                          capture_output=True).stdout
-    # Enlarge the owned capture for small labels on solid buttons. This is an
-    # ephemeral OCR input; retained PNGs remain the unmodified native captures.
-    png = subprocess.run(['convert', 'png:-', '-resize', '200%', 'png:-'], input=png,
+    # Separate light labels from dark/blue button fills before OCR's automatic
+    # binarization can merge them. This ephemeral analysis copy is enlarged;
+    # retained PNGs remain unmodified native captures.
+    png = subprocess.run(['convert', 'png:-', '-colorspace', 'Gray', '-threshold', '60%', '-negate', '-resize', '200%', 'png:-'], input=png,
                          check=True, capture_output=True).stdout
     result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'eng',
                              '--psm', '11', 'tsv'], input=png, check=True,
@@ -413,7 +414,9 @@ class Study:
             assert os.path.realpath(f'/proc/{pid}/exe') == executable
             key(w, shortcut); assert self.track(w) == sorted(pids)
         self.shot(w, '20-reopened-real-shells.png')
-        key(w, 'ctrl+shift+p'); key(w, 'End'); key(w, 'Up'); key(w, 'Delete')
+        key(w, 'ctrl+shift+p'); key(w, 'Home')
+        for _ in range(read_json(file)['order'].index(admin['id'])): key(w, 'Down')
+        key(w, 'Delete')
         wait_for(lambda: all(t['id'] != admin['id'] for t in read_json(file)['items']))
         key(w, 'Escape')
         assert set(self.track(w)) == set(pids)
