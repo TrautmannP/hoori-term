@@ -401,7 +401,12 @@ class Study:
         w, file = self.create('main-window', seed)
         first = self.track(w)[0]
         assert len(self.track(w)) == 1
-        self.edit_name(w, 'Scratch'); self.capture(w, 'F10'); key(w, 'Return')
+        self.edit_name(w, 'Scratch')
+        wheel(w, 4, 30); press(w, 'Aufnehmen', panel=True, scroll=True)
+        key(w, 'ctrl+shift+t')
+        self.shot(w, '13a-readable-disabled-draft.png')
+        assert len(self.track(w)) == 1
+        key(w, 'Escape'); self.capture(w, 'F10'); key(w, 'Return')
         self.activate(w, 'F9', 'Admin')
         bash_pid = next(p for p in self.track(w) if p != first)
         assert os.readlink(f'/proc/{bash_pid}/cwd') == str(admin_dir)
