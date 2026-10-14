@@ -15,6 +15,10 @@ Tabs can be reordered within their pin/ordinary group. Linked tabs carry the
 saved template order; ordinary tabs remain temporary.
 Dynamic terminal titles and explicitly reported program status complement the
 own tab identity. Their runtime values are never saved in templates.
+The opaque blue-grey layout groups shell starts/templates on the left and a
+bounded draft editor on the right, keeping the terminal as the main surface.
+Navigation and editing overlay the terminal in narrow windows; the native
+minimum stays 640 × 360. See [layout and recovery controls](docs/hoo-37-layout.md).
 
 ## Run
 
@@ -63,20 +67,20 @@ choice starts none. Click a tab to activate it. Inactive tabs keep processing ou
 | New session using the launch shell/arguments | Ctrl+Shift+T |
 | New Bash session | Ctrl+Shift+B |
 | Focus the tab strip / window controls | Ctrl+Shift+L |
-| Inspect full terminal title / reported status | Right-click a tab; or Ctrl+Shift+L, focus a tab, I; **Titel/Status** for the active tab |
+| Inspect full terminal title / reported status | Right-click a tab; or Ctrl+Shift+L, focus a tab, I; **Details / Aktionen** for the active tab |
 | Reorder a tab within its pin/ordinary group | Drag its body; or Ctrl+Shift+L, focus a tab, Alt+Left/Right |
 | Move / maximize or restore window | Drag / double-click the dotted build-hash area |
 | Resize window | Drag a window edge or corner |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Close active unpinned tab | Ctrl+Shift+W or its × button |
-| Pin / unpin the active tab | **Tab anpinnen** / **Tab entpinnen** |
-| Explicitly close a pinned tab | **Angepinnten Tab schließen** |
-| Switch active tab normal / compact | **Kompaktansicht** / **Normalansicht** |
-| Edit active tab name / accent / direct shortcut / symbol | Ctrl+Shift+E or **Tab bearbeiten** |
-| Save active tab as a template / edit its linked template | Ctrl+Shift+S or **Als Vorlage speichern** / **Vorlage bearbeiten** |
+| Pin / unpin the active tab | **Details / Aktionen → Anpinnen / Entpinnen** |
+| Explicitly close a pinned tab | **Details / Aktionen → Angepinnten Tab bewusst schließen** |
+| Switch active tab normal / compact | **Details / Aktionen → Kompaktansicht / Normalansicht** |
+| Edit active tab name / accent / direct shortcut / symbol | Ctrl+Shift+E or **Bearbeiten** |
+| Save active tab as a template / edit its linked template | Ctrl+Shift+S or the navigation save/edit action |
 | Choose a symbol while editing | F6 or **Auswählen**; arrows/Tab, Enter; Esc cancels the chooser |
 | Switch the editor's presentation draft | F7 or **Kompakt anzeigen** / **Normal anzeigen** |
-| List saved templates | Ctrl+Shift+P or **Vorlagen** |
+| List saved templates | Ctrl+Shift+P or **Liste** / **Navigation** |
 | Select / copy / paste | Drag left mouse / Ctrl+Shift+C / Ctrl+Shift+V |
 | Scroll history | Mouse wheel, Shift+PageUp / Shift+PageDown |
 | Oldest history / live output | Ctrl+Shift+Home / Ctrl+Shift+End or **↓ Live** |
@@ -90,7 +94,7 @@ tab/newlines, and normalizes newlines to carriage returns outside that mode.
 Pastes over 65,524 UTF-8 bytes are rejected visibly before sending any data;
 queue saturation also rejects a whole entry rather than a partial bracket.
 
-**Tab bearbeiten** opens a draft with a name (up to 40 characters), eight
+**Bearbeiten** opens a draft with a name (up to 40 characters), eight
 accent choices and a shortcut recorder. Click **Aufnehmen**, press a combination,
 then **Übernehmen** to apply all changes together. Use Ctrl, Alt or Super with
 a character/navigation key, or F1–F12 with optional modifiers. Duplicate tab

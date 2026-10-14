@@ -1,8 +1,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod appearance;
 mod graphics_info;
 mod symbols_view;
 mod tab_strip;
+mod ui;
 mod view;
 mod window_chrome;
 #[cfg(all(windows, feature = "validation"))]
@@ -20,10 +22,8 @@ use hoori_term::templates::{
 };
 use hoori_term::terminal::GridSize;
 use iced::futures::StreamExt;
-use iced::widget::{
-    button, canvas, column, container, operation, row, scrollable, space, stack, text, text_input,
-};
-use iced::{Element, Event, Fill, Subscription, Task, Theme, keyboard, window};
+use iced::widget::{canvas, operation};
+use iced::{Event, Fill, Subscription, Task, keyboard, window};
 
 #[derive(Clone)]
 struct Options {
@@ -95,7 +95,7 @@ fn main() -> iced::Result {
     iced::application(move || App::boot(options.clone()), App::update, App::view)
         .title(App::title)
         .subscription(App::subscription)
-        .theme(Theme::TokyoNight)
+        .theme(appearance::theme())
         .window(window::Settings {
             size: iced::Size::new(1000.0, 700.0),
             min_size: Some(iced::Size::new(640.0, 360.0)),
@@ -126,6 +126,8 @@ enum Message {
     CancelTabDrag,
     MoveTab(TabId, tab_strip::DropTarget),
     ChooseShell(usize),
+    StartShell(usize),
+    ShowLaunch,
     CancelLaunch,
     #[cfg(windows)]
     LaunchesLoaded(Inventory, bool),
@@ -134,6 +136,7 @@ enum Message {
     SetPinned(TabId, bool),
     SetCompact(TabId, bool),
     InspectTab(TabId),
+    InspectAction(TabId, ui::TabAction),
     HideInspection,
     InspectionScrolled(f32),
     Select {
@@ -163,6 +166,7 @@ enum Message {
     ConfirmClose,
     ShutdownComplete,
     ShowTemplates,
+    SelectTemplate(TemplateId),
     HideTemplates,
     SaveTemplate(TabId),
     OpenTemplate(TemplateId),
@@ -244,6 +248,7 @@ struct App {
     strip: tab_strip::State,
     chrome: window_chrome::State,
     viewport_height: f32,
+    viewport_width: f32,
     launching: Option<usize>,
     launches: Inventory,
     discovering: bool,
@@ -285,6 +290,7 @@ impl App {
             strip: tab_strip::State::default(),
             chrome: window_chrome::State::default(),
             viewport_height: 700.0,
+            viewport_width: 1000.0,
             launching: None,
             launches: Inventory::local(),
             discovering: false,
@@ -545,6 +551,7 @@ impl App {
             window::Event::Resized(size) => {
                 self.strip.dragging = None;
                 self.viewport_height = size.height;
+                self.viewport_width = size.width;
                 self.observe_window()
             }
             window::Event::Rescaled(_) => {
@@ -1181,6 +1188,7 @@ impl App {
                     | Message::Event(..)
                     | Message::HideInspection
                     | Message::InspectionScrolled(_)
+                    | Message::InspectAction(..)
                     | Message::ShutdownComplete
             )
         {
@@ -1235,6 +1243,10 @@ impl App {
                     | Message::StripWidth(_)
                     | Message::Event(..)
                     | Message::HideTemplates
+                    | Message::SelectTemplate(_)
+                    | Message::StartShell(_)
+                    | Message::ShowLaunch
+                    | Message::SaveTemplate(_)
                     | Message::OpenTemplate(_)
                     | Message::EditTemplate(_)
                     | Message::RemoveTemplate(_)
@@ -1250,6 +1262,13 @@ impl App {
                     && self.tabs.active == Some(id)
                 {
                     self.cache.clear();
+                }
+            }
+            Message::InspectAction(id, action) => {
+                if self.inspecting == Some(id) {
+                    self.inspecting = None;
+                    self.strip.focused = None;
+                    return self.tab_action(id, action);
                 }
             }
             Message::InspectTab(id) => {
@@ -1301,10 +1320,7 @@ impl App {
                     Target::Close(id) => return self.update(Message::Close(CloseTarget::Tab(id))),
                     Target::Previous => self.strip.scroll(&self.tabs, -224.0),
                     Target::Next => self.strip.scroll(&self.tabs, 224.0),
-                    Target::Plus => {
-                        self.launching = Some(0);
-                        self.strip.focused = None;
-                    }
+                    Target::Plus => return self.update(Message::ShowLaunch),
                     Target::Window(control) => {
                         return self.window_action(window_chrome::Action::Control(control));
                     }
@@ -1373,6 +1389,19 @@ impl App {
                         }
                     }
                     Err(error) => self.error = Some(error),
+                }
+            }
+            Message::ShowLaunch => {
+                self.templates_open = false;
+                self.launching = Some(0);
+                self.strip.focused = None;
+            }
+            Message::StartShell(index) => {
+                if !self.discovering && self.launches.choices.get(index).is_some_and(|c| c.enabled)
+                {
+                    self.templates_open = false;
+                    self.launching = Some(index);
+                    return self.update(Message::ChooseShell(index));
                 }
             }
             Message::ChooseShell(index) => {
@@ -1611,6 +1640,7 @@ impl App {
                             self.templates_open =
                                 matches!(editor.target, EditorTarget::Template(_));
                             self.editing = None;
+                            self.strip.focused = None;
                             self.reveal_active();
                             self.cache.clear();
                             if changed {
@@ -1628,6 +1658,8 @@ impl App {
                     .as_ref()
                     .is_some_and(|e| matches!(e.target, EditorTarget::Template(_)));
                 self.editing = None;
+                self.strip.focused = None;
+                self.cache.clear();
                 return self.reveal_template_selection();
             }
             Message::CancelClose => self.confirming = None,
@@ -1651,7 +1683,18 @@ impl App {
                 }
                 return self.reveal_template_selection();
             }
-            Message::HideTemplates => self.templates_open = false,
+            Message::SelectTemplate(id) => {
+                if self.catalog.get(id).is_some() {
+                    self.templates_open = true;
+                    self.selected_template = Some(id);
+                    self.strip.focused = None;
+                    return self.reveal_template_selection();
+                }
+            }
+            Message::HideTemplates => {
+                self.templates_open = false;
+                self.strip.focused = None;
+            }
             Message::OpenTemplate(id) => {
                 if self.templates_loaded {
                     let size = self
@@ -1673,6 +1716,7 @@ impl App {
                     && let Some(template) = self.catalog.get(id)
                 {
                     self.selected_template = Some(id);
+                    self.strip.focused = None;
                     self.templates_open = false;
                     self.editing = Some(TabEditor {
                         target: EditorTarget::Template(id),
@@ -1809,762 +1853,6 @@ impl App {
             })
             .unwrap_or_default()
     }
-
-    fn inspection_view(&self, id: TabId) -> Element<'_, Message> {
-        let Some(tab) = self.tabs.get(id) else {
-            return container(button("Zurück").on_press(Message::HideInspection)).into();
-        };
-        let process = match tab.state() {
-            ProcessState::Running => "läuft".into(),
-            ProcessState::Exited(code) => format!("beendet · Exit {code}"),
-            ProcessState::Failed(error) => format!("Startfehler · {error}"),
-        };
-        let status = &tab.terminal.program_status;
-        let mut fields = column![
-            text(format!("Titel/Status · {}", tab.description())).size(18),
-            text(format!("PTY-Prozess: {process}")).size(13),
-            text(format!(
-                "Terminaltitel: {}",
-                if tab.terminal.shell_title.is_empty() {
-                    "(leer)"
-                } else {
-                    &tab.terminal.shell_title
-                }
-            ))
-            .size(13),
-            text(status.summary_label()).size(13),
-            text(
-                "Vom Programm gemeldete Angaben · keine automatische Aktion · nur für diese Sitzung"
-            )
-            .size(12),
-        ]
-        .spacing(8);
-        if let Some(error) = &tab.error {
-            fields = fields.push(text(format!("PTY-/Eingabefehler: {error}")).size(12));
-        }
-        let mut records: Vec<_> = status.records().collect();
-        records.sort_by(|a, b| a.id.cmp(&b.id));
-        for record in records {
-            let source = if record.id.is_empty() {
-                "Hauptmeldung"
-            } else {
-                &record.id
-            };
-            let mut details = column![
-                text(format!(
-                    "{source} · CLI: {}{}",
-                    record.state.label(),
-                    record
-                        .kind
-                        .map(|k| format!(" · {} benötigt", k.label()))
-                        .unwrap_or_default()
-                ))
-                .size(13)
-                .color(tab_strip::status_color(record.state)),
-            ]
-            .spacing(4);
-            if let Some(app) = status.inherited_app(record) {
-                details = details.push(text(format!("Gemeldete Programmkennung: {app}")).size(12));
-            }
-            if let Some(title) = &record.title {
-                details = details.push(text(format!("Bezeichnung: {title}")).size(13));
-            }
-            if let Some(progress) = record.progress {
-                details =
-                    details.push(text(format!("Gemeldeter Fortschritt: {progress}%")).size(12));
-            }
-            if let Some(message) = &record.message {
-                details = details.push(text(format!("Meldung: {message}")).size(13));
-            }
-            fields = fields.push(
-                container(details)
-                    .padding(8)
-                    .width(Fill)
-                    .style(container::rounded_box),
-            );
-        }
-        container(
-            column![
-                scrollable(fields)
-                    .id("runtime-details")
-                    .height(Fill)
-                    .on_scroll(|viewport| Message::InspectionScrolled(
-                        viewport.relative_offset().y
-                    )),
-                row![
-                    text("Mausrad/Pfeile/Bild↑↓/Pos1/Ende · Esc: zurück")
-                        .size(12)
-                        .width(Fill),
-                    button("Zurück zum Terminal").on_press(Message::HideInspection)
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            ]
-            .spacing(8),
-        )
-        .height(self.editor_height())
-        .padding(12)
-        .style(container::rounded_box)
-        .into()
-    }
-
-    fn view(&self) -> Element<'_, Message> {
-        use iced::widget::tooltip;
-        let interactive = self.confirming.is_none()
-            && self.editing.is_none()
-            && self.inspecting.is_none()
-            && self.launching.is_none()
-            && !self.templates_open
-            && !self.closing;
-        let header = canvas(tab_strip::TabStrip {
-            tabs: &self.tabs,
-            state: &self.strip,
-            interactive,
-            window_interactive: !self.closing,
-            maximized: self.chrome.maximized,
-        })
-        .width(Fill)
-        .height(tab_strip::HEIGHT);
-        let inspection = match self.strip.hovered {
-            Some(tab_strip::Target::Tab(id) | tab_strip::Target::Close(id)) => self.inspect_tab(id, self.strip.hovered == Some(tab_strip::Target::Close(id))),
-            Some(tab_strip::Target::Plus) => "Neue Sitzung auswählen".into(),
-            Some(tab_strip::Target::Previous | tab_strip::Target::Next) => "Tableiste verschieben · auch mit Mausrad".into(),
-            Some(tab_strip::Target::Window(control)) => format!("{} · Strg+Umschalt+L, Umschalt+Tab: Fensterknöpfe", control.label(self.chrome.maximized)),
-            Some(tab_strip::Target::Drag) => format!("{}\nZiehen: Fenster bewegen · Doppelklick: maximieren/wiederherstellen", build_info::metadata()),
-            None => "Tabs im eigenen Bereich ziehen · Esc: abbrechen · Mausrad beim Ziehen: Überlauf\nStrg+Umschalt+L: Tableiste · Alt+Links/Rechts: verschieben · C: Ansicht · E: bearbeiten · Esc: Terminal".into(),
-        };
-        // Removing the tooltip widget also removes an already visible overlay.
-        // A longer delay only affects a future hover and leaves it on dialogs.
-        let header: Element<'_, Message> = if interactive && self.strip.dragging.is_none() {
-            tooltip(
-                header,
-                container(text(inspection).size(12).width(420))
-                    .padding(8)
-                    .style(container::rounded_box),
-                tooltip::Position::Bottom,
-            )
-            .delay(std::time::Duration::from_millis(600))
-            .into()
-        } else {
-            header.into()
-        };
-        let mut content = column![header];
-        if self.discovering {
-            content =
-                content.push(container(text("WSL-Ziele werden ermittelt …").size(13)).padding(8));
-        } else if let Some(notice) = &self.launches.notice {
-            content = content.push(container(text(notice).size(13)).padding(8));
-        }
-        if interactive
-            && let Some(target @ (tab_strip::Target::Tab(id) | tab_strip::Target::Close(id))) =
-                self.strip.focused
-        {
-            content = content.push(container(column![
-                text(self.inspect_tab(id, matches!(target, tab_strip::Target::Close(_)))).size(13),
-                text("Pfeile: Vorschau · I: Titel/Status · Alt+Links/Rechts: verschieben · C: Ansicht · E: bearbeiten · Enter: auswählen · Entf: schließen · Esc: Terminal").size(12),
-            ].spacing(4)).padding([6, 10]).width(Fill).style(container::rounded_box));
-        }
-        let storage_status = if self.templates_loading {
-            "Vorlagen werden geladen …"
-        } else if !self.templates_loaded {
-            "Vorlagen nicht geladen · Datei bleibt erhalten"
-        } else if self.saving.is_some() {
-            "Vorlagen werden gespeichert …"
-        } else if self.revision != self.saved_revision {
-            "Vorlagenänderungen NICHT gespeichert"
-        } else {
-            "Vorlagen bereit · kein automatischer Start"
-        };
-        let mut template_toolbar = column![
-            row![
-                button(text("Vorlagen · Strg+Umschalt+P").size(12))
-                    .on_press_maybe(interactive.then_some(Message::ShowTemplates)),
-                button(
-                    text(
-                        if self.tabs.current().is_some_and(|t| t.template.is_some()) {
-                            "Vorlage bearbeiten"
-                        } else {
-                            "Als Vorlage speichern"
-                        }
-                    )
-                    .size(12)
-                )
-                .on_press_maybe(
-                    (interactive && self.templates_loaded)
-                        .then(|| self.tabs.active.map(Message::SaveTemplate))
-                        .flatten()
-                ),
-                button(text("Titel/Status").size(12)).on_press_maybe(
-                    interactive
-                        .then(|| self.tabs.active.map(Message::InspectTab))
-                        .flatten()
-                ),
-                text(storage_status).size(12).width(Fill),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        ]
-        .spacing(4);
-        if let Some(tab) = self.tabs.current() {
-            template_toolbar = template_toolbar.push(
-                row![
-                    button(
-                        text(if tab.pinned {
-                            "Tab entpinnen"
-                        } else {
-                            "Tab anpinnen"
-                        })
-                        .size(12)
-                    )
-                    .on_press_maybe(interactive.then_some(Message::SetPinned(tab.id, !tab.pinned))),
-                    button(text("Angepinnten Tab schließen").size(12))
-                        .style(button::danger)
-                        .on_press_maybe(
-                            (interactive && tab.pinned)
-                                .then_some(Message::Close(CloseTarget::PinnedTab(tab.id)))
-                        ),
-                    button(
-                        text(if tab.identity.compact {
-                            "Normalansicht"
-                        } else {
-                            "Kompaktansicht"
-                        })
-                        .size(12)
-                    )
-                    .on_press_maybe(
-                        interactive.then_some(Message::SetCompact(tab.id, !tab.identity.compact))
-                    ),
-                    text(format!(
-                        "{} · {} · Benutzersymbol: {}",
-                        if tab.pinned {
-                            "PIN · normales Schließen geschützt"
-                        } else {
-                            "Gewöhnlicher Tab"
-                        },
-                        if tab.identity.compact {
-                            "kompakt"
-                        } else {
-                            "normal"
-                        },
-                        symbols::label(tab.identity.symbol)
-                    ))
-                    .size(12)
-                    .width(Fill),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            );
-        }
-        let template_toolbar = container(template_toolbar).padding([4, 8]);
-        let template_toolbar: Element<'_, Message> = if cfg!(windows) {
-            container(
-                button(text("Titel/Status").size(12)).on_press_maybe(
-                    interactive
-                        .then(|| self.tabs.active.map(Message::InspectTab))
-                        .flatten(),
-                ),
-            )
-            .padding([4, 8])
-            .into()
-        } else {
-            template_toolbar.into()
-        };
-        if let Some(error) = &self.storage_error {
-            content = content.push(
-                container(
-                    column![
-                        text(error)
-                            .size(12)
-                            .color(iced::Color::from_rgb8(255, 125, 145)),
-                        if self.templates_loaded {
-                            button("Erneut speichern")
-                                .on_press_maybe(self.saving.is_none().then_some(Message::RetrySave))
-                        } else {
-                            button("Erneut laden").on_press_maybe(
-                                (!self.templates_loading).then_some(Message::RetryLoad),
-                            )
-                        },
-                    ]
-                    .spacing(4),
-                )
-                .padding(8),
-            );
-        }
-        if self.templates_open {
-            content = content.push(self.templates_view());
-        }
-        if let Some(id) = self.inspecting {
-            content = content.push(self.inspection_view(id));
-        }
-        if let Some(selected) = self.launching {
-            let choice = |label: String, index: usize, message: Option<Message>| {
-                button(text(label))
-                    .width(if cfg!(windows) {
-                        iced::Length::Fill
-                    } else {
-                        iced::Length::Shrink
-                    })
-                    .on_press_maybe(message)
-                    .style(move |theme, status| {
-                        if selected == index {
-                            button::primary(theme, status)
-                        } else {
-                            button::secondary(theme, status)
-                        }
-                    })
-            };
-            let mut choices = column![].spacing(6);
-            for (index, target) in self.launches.choices.iter().enumerate() {
-                choices = choices.push(choice(
-                    target.label.clone(),
-                    index,
-                    (target.enabled && !self.discovering).then_some(Message::ChooseShell(index)),
-                ));
-            }
-            choices = choices.push(choice(
-                "Abbrechen".into(),
-                self.launches.choices.len(),
-                Some(Message::CancelLaunch),
-            ));
-            let choices: Element<'_, Message> = if cfg!(windows) {
-                scrollable(choices)
-                    .height(((self.launches.choices.len() + 1) as f32 * 36.0).min(180.0))
-                    .into()
-            } else {
-                row![
-                    choice("zsh öffnen".into(), 0, Some(Message::ChooseShell(0))),
-                    choice("Bash öffnen".into(), 1, Some(Message::ChooseShell(1))),
-                    space::horizontal(),
-                    choice("Abbrechen".into(), 2, Some(Message::CancelLaunch)),
-                ]
-                .spacing(8)
-                .into()
-            };
-            content = content.push(
-                container(
-                    column![
-                        text("Neue Sitzung").size(18),
-                        text("Shell bewusst auswählen · Pfeile/Tab, Enter · Esc bricht ab")
-                            .size(12),
-                        choices,
-                    ]
-                    .spacing(10),
-                )
-                .padding(12)
-                .style(container::rounded_box),
-            );
-        }
-        if let Some(target) = self.confirming {
-            let names = self.tabs.running_names(target);
-            let title = if names.is_empty() {
-                "Sitzungen sind inzwischen beendet. Schließen?".into()
-            } else {
-                format!("Laufende Sitzungen beenden: {}?", names.join(", "))
-            };
-            content = content.push(
-                container(
-                    row![
-                        text(title).size(14).width(Fill),
-                        button("Abbrechen").on_press(Message::CancelClose),
-                        button("Beenden")
-                            .on_press(Message::ConfirmClose)
-                            .style(button::danger)
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Center),
-                )
-                .padding(10),
-            );
-        }
-        if let Some(editor) = &self.editing {
-            content = content.push(self.editor_view(editor));
-        }
-        if let Some(tab) = self.tabs.current() {
-            content = content.push(
-                canvas(view::TerminalView {
-                    id: tab.id,
-                    terminal: &tab.terminal,
-                    cache: &self.cache,
-                    interactive,
-                })
-                .width(Fill)
-                .height(Fill),
-            );
-            if let Some(error) = self.error.as_ref().or(tab.error.as_ref()) {
-                content = content.push(container(text(error).size(14)).padding(8));
-            }
-            if self.editing.is_none() && self.inspecting.is_none() {
-                content = content.push(template_toolbar);
-            }
-            let status = match tab.state() {
-                ProcessState::Running => "läuft".into(),
-                ProcessState::Exited(code) => format!("beendet · Exit {code}"),
-                ProcessState::Failed(_) => "Startfehler".into(),
-            };
-            let offset = tab.terminal.term.grid().display_offset();
-            content = content.push(
-                container(
-                    row![
-                        text(format!(
-                            "{} · {status} · {} × {} · Verlauf {offset}",
-                            tab.description(),
-                            tab.terminal.size.columns,
-                            tab.terminal.size.rows
-                        ))
-                        .size(12)
-                        .width(Fill),
-                        button(text("Tab bearbeiten").size(12))
-                            .on_press_maybe(interactive.then_some(Message::Edit(tab.id))),
-                        button(text("Kopieren").size(12))
-                            .on_press_maybe(interactive.then_some(Message::Copy)),
-                        button(text("Einfügen").size(12))
-                            .on_press_maybe(interactive.then_some(Message::Paste)),
-                        button(text("↓ Live").size(12))
-                            .on_press_maybe(interactive.then_some(Message::Live)),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
-                )
-                .padding(8)
-                .height(48),
-            );
-        } else if self.closing {
-            content = content.push(template_toolbar);
-            content = content.push(
-                container(
-                    column![
-                        text(if self.saving.is_some() {
-                            "Vorlagen werden vor dem Beenden gespeichert …"
-                        } else if self.revision != self.saved_revision {
-                            "Sitzungen beendet. Vorlagenänderungen sind NICHT gespeichert."
-                        } else {
-                            "Sitzungen werden beendet …"
-                        }),
-                        button("Ungespeichert beenden").on_press_maybe(
-                            (self.closing
-                                && self.pending_shutdowns == 0
-                                && self.saving.is_none()
-                                && self.revision != self.saved_revision)
-                                .then_some(Message::DiscardAndExit)
-                        )
-                    ]
-                    .spacing(12),
-                )
-                .padding(16)
-                .height(Fill),
-            );
-        } else {
-            content = content.push(container(text("Über + eine Sitzung auswählen. Es wird keine Ersatz-Shell automatisch gestartet.")).padding(16).height(Fill));
-        }
-        stack([
-            container(content).width(Fill).height(Fill).into(),
-            canvas(window_chrome::ResizeBorder {
-                enabled: !self.closing && !self.chrome.maximized,
-            })
-            .width(Fill)
-            .height(Fill)
-            .into(),
-        ])
-        .width(Fill)
-        .height(Fill)
-        .into()
-    }
-
-    fn templates_view(&self) -> Element<'_, Message> {
-        let mut entries = column![].spacing(6);
-        for template in self.catalog.ordered() {
-            let id = template.id;
-            let link = self.tabs.items.iter().find(|t| t.template == Some(id));
-            let state = match link.map(|t| t.state()) {
-                Some(ProcessState::Running) => "geöffnet",
-                Some(_) => "geöffnet · beendet/Fehler",
-                None => "geschlossen",
-            };
-            let shortcut = template
-                .identity
-                .shortcut
-                .as_ref()
-                .map(Shortcut::label)
-                .unwrap_or_else(|| "kein Shortcut".into());
-            let directory: String = template.directory.chars().take(90).collect();
-            entries = entries.push(
-                container(
-                    column![
-                        row![
-                            button(text(template.name()).size(14))
-                                .on_press(Message::OpenTemplate(id))
-                                .width(Fill)
-                                .style(move |theme, status| accent_style(
-                                    theme,
-                                    status,
-                                    template.identity.accent,
-                                    Some(id) == self.selected_template
-                                )),
-                            button("Bearbeiten").on_press(Message::EditTemplate(id)),
-                            button("Entfernen").on_press(Message::RemoveTemplate(id))
-                        ]
-                        .spacing(8),
-                        text(format!(
-                            "{} · {}{shortcut} · {state} · Symbol: {} · {} · {directory}",
-                            template.shell.label(),
-                            if template.pinned { "PIN · " } else { "" },
-                            symbols::label(template.identity.symbol),
-                            if template.identity.compact {
-                                "kompakt"
-                            } else {
-                                "normal"
-                            },
-                        ))
-                        .size(12),
-                    ]
-                    .spacing(3),
-                )
-                .padding(4),
-            );
-        }
-        if self.catalog.items.is_empty() {
-            entries = entries.push(
-                text("Noch keine Vorlagen. Einen Tab bewusst als Vorlage speichern.").size(14),
-            );
-        }
-        container(column![
-            row![text("Gespeicherte Vorlagen").size(18).width(Fill),button("Zurück").on_press(Message::HideTemplates)].spacing(8),
-            text("Pfeile wählen · Enter öffnen/aktivieren · E bearbeiten · Entf entfernen · Esc zurück").size(12),
-            text("Entfernen löst die Verknüpfung und den Shortcut; ein laufender Tab bleibt erhalten.").size(12),
-                scrollable(entries).id("template-list").height(240),
-        ].spacing(8)).padding(12).style(container::rounded_box).into()
-    }
-
-    fn editor_view<'a>(&'a self, editor: &'a TabEditor) -> Element<'a, Message> {
-        if let Some(focused) = editor.symbol_picker {
-            let mut choices = column![].spacing(8);
-            for start in (0..=Symbol::ALL.len()).step_by(3) {
-                let mut line = row![].spacing(8);
-                for index in start..(start + 3).min(Symbol::ALL.len() + 1) {
-                    let symbol = Symbol::choice(index);
-                    line = line.push(
-                        button(
-                            row![
-                                canvas(symbols_view::Icon(symbol)).width(24).height(24),
-                                text(symbols::label(symbol)).size(14),
-                            ]
-                            .spacing(8)
-                            .align_y(iced::Center),
-                        )
-                        .width(Fill)
-                        .padding(8)
-                        .on_press(Message::SelectSymbol(symbol))
-                        .style(if index == focused {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }),
-                    );
-                }
-                choices = choices.push(line);
-            }
-            return container(
-                column![
-                    text("Tab-Symbol auswählen").size(18),
-                    text(format!(
-                        "Bisher im Entwurf: {} · Benutzersymbole sind keine Statusmeldungen.",
-                        symbols::label(editor.symbol)
-                    ))
-                    .size(12),
-                    text("Pfeile/Tab wählen · Enter auswählen · Esc zurück ohne Änderung").size(12),
-                    scrollable(choices).id("symbols-list").height(Fill),
-                    row![
-                        space::horizontal(),
-                        button("Abbrechen").on_press(Message::CancelSymbols)
-                    ],
-                ]
-                .spacing(8),
-            )
-            .padding(12)
-            .height(self.editor_height())
-            .style(container::rounded_box)
-            .into();
-        }
-        let mut colors = row![text("Farbe").size(14).width(70)]
-            .spacing(6)
-            .align_y(iced::Center);
-        for accent in Accent::ALL {
-            let selected = editor.accent == accent;
-            colors = colors.push(
-                button(text(accent.label()).size(13))
-                    .on_press(Message::EditAccent(accent))
-                    .style(move |theme, status| accent_style(theme, status, accent, selected)),
-            );
-        }
-        let shortcut = editor
-            .shortcut
-            .as_ref()
-            .map(Shortcut::label)
-            .unwrap_or_else(|| "Kein Shortcut".into());
-        let helper = if editor.recording {
-            "Jetzt Tastenkombination drücken. Esc beendet die Aufnahme."
-        } else {
-            "Strg, Alt oder Super + Taste; F1–F12 auch ohne. Gilt im fokussierten Fenster."
-        };
-        let name_input = text_input("Leer = ursprünglicher Sitzungsname", &editor.name)
-            .id("tab-name")
-            .on_input_maybe(
-                (!editor.recording).then_some(Message::EditName as fn(String) -> Message),
-            )
-            .size(16)
-            .padding(8);
-        let mut fields = column![
-            text(match editor.target {
-                EditorTarget::Tab(id) => format!("Tab bearbeiten · Sitzung {}", id.0),
-                EditorTarget::Save(id) => format!("Als Vorlage speichern · Sitzung {}", id.0),
-                EditorTarget::Template(id) => format!("Vorlage bearbeiten · Vorlage {}", id.0),
-            }).size(18),
-            row![text("Name").size(14).width(70), name_input]
-                .spacing(6)
-                .align_y(iced::Center),
-            text(format!(
-                "Bis zu {} Zeichen. {}",
-                hoori_term::tabs::MAX_NAME_CHARS
-                ,if matches!(editor.target,EditorTarget::Tab(id) if self.tabs.get(id).is_some_and(|t|t.template.is_some())) { "Benutzeränderungen werden automatisch in der verknüpften Vorlage gespeichert." } else if matches!(editor.target,EditorTarget::Tab(_)) { "Vorübergehender Tab; Änderungen werden nicht gespeichert." } else { "Vorlage wird lokal gespeichert. Kein zusätzlicher Prozessstart beim Speichern." }
-            ))
-            .size(12),
-            colors,
-            row![
-                text("Shortcut").size(14).width(70),
-                text(shortcut).size(14).width(Fill),
-                button(if editor.recording {
-                    "Aufnahme abbrechen"
-                } else {
-                    "Aufnehmen"
-                })
-                .on_press(Message::CaptureShortcut),
-                button("Entfernen")
-                    .on_press(Message::ClearShortcut)
-                    .style(button::secondary),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text(helper).size(12),
-        ]
-        .spacing(10);
-        if !matches!(editor.target, EditorTarget::Tab(_)) {
-            fields = fields.push(row![
-                text("Startziel").size(14).width(70),
-                button("zsh").on_press(Message::EditShell(TemplateShell::Zsh)).style(if editor.shell==TemplateShell::Zsh { button::primary } else { button::secondary }),
-                button("Bash").on_press(Message::EditShell(TemplateShell::Bash)).style(if editor.shell==TemplateShell::Bash { button::primary } else { button::secondary }),
-            ].spacing(8).align_y(iced::Center))
-            .push(row![text("Verzeichnis").size(14).width(90),text_input("Absolutes Startverzeichnis",&editor.directory).id("template-directory").on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String)->Message)).size(14).padding(8)].spacing(8).align_y(iced::Center))
-            .push(text("Startziel und Verzeichnis gelten beim nächsten neuen Prozess. Offene Tabs werden nicht neu gestartet.").size(12));
-        }
-        fields = fields.push(
-            row![
-                text("Symbol").size(14).width(70),
-                canvas(symbols_view::Icon(editor.symbol))
-                    .width(24)
-                    .height(24),
-                text(symbols::label(editor.symbol)).size(14).width(Fill),
-                button("Auswählen (F6)")
-                    .on_press_maybe((!editor.recording).then_some(Message::ShowSymbols)),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        );
-        fields = fields.push(
-            row![
-                text("Ansicht").size(14).width(70),
-                text(if editor.compact { "Kompakt" } else { "Normal" })
-                    .size(14)
-                    .width(Fill),
-                button(if editor.compact {
-                    "Normal anzeigen (F7)"
-                } else {
-                    "Kompakt anzeigen (F7)"
-                })
-                .on_press_maybe(
-                    (!editor.recording).then_some(Message::EditCompact(!editor.compact))
-                ),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        );
-        fields = fields.push(
-            text(if editor.pinned {
-                "PIN · angepinnt. Beim zugehörigen Tab bewusst entpinnen."
-            } else {
-                "Nicht angepinnt. Beim zugehörigen Tab bewusst anpinnen."
-            })
-            .size(12),
-        );
-        if let Some(error) = &editor.error {
-            fields = fields.push(
-                text(error)
-                    .size(14)
-                    .color(iced::Color::from_rgb8(255, 125, 145)),
-            );
-        }
-        let actions = row![
-            space::horizontal(),
-            button("Abbrechen")
-                .on_press(Message::CancelEdit)
-                .style(button::secondary),
-            button("Übernehmen").on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
-        ]
-        .spacing(8);
-        container(
-            column![
-                scrollable(fields).id("tab-editor-fields").height(Fill),
-                actions
-            ]
-            .spacing(8),
-        )
-        .padding(12)
-        .height(self.editor_height())
-        .style(container::rounded_box)
-        .into()
-    }
-
-    fn editor_height(&self) -> f32 {
-        // Keep the action row reachable on short windows. Only the fields
-        // scroll; the PTY still receives the resulting viewport dimensions.
-        (self.viewport_height - 130.0).clamp(210.0, 420.0)
-    }
-}
-
-fn accent_style(
-    theme: &Theme,
-    status: button::Status,
-    accent: Accent,
-    active: bool,
-) -> button::Style {
-    let [r, g, b] = accent.rgb();
-    let color = iced::Color::from_rgb8(r, g, b);
-    let strength = if status == button::Status::Hovered {
-        0.35
-    } else if active {
-        0.25
-    } else {
-        0.12
-    };
-    let mut style = button::secondary(theme, status);
-    style.background = Some(
-        iced::Color {
-            r: color.r * strength,
-            g: color.g * strength,
-            b: color.b * strength,
-            a: 1.0,
-        }
-        .into(),
-    );
-    style.border = iced::Border {
-        color: if active {
-            iced::Color::from_rgb8(235, 240, 255)
-        } else {
-            color
-        },
-        width: if active { 2.0 } else { 1.0 },
-        radius: 4.0.into(),
-    };
-    style
 }
 
 #[cfg(all(test, windows))]
@@ -3001,6 +2289,83 @@ mod tests {
     }
 
     #[test]
+    fn side_panel_and_navigation_actions_keep_their_id_and_reject_stale_commands() {
+        let mut app = App::new(Options {
+            shell: "/nonexistent/hoo37-model".into(),
+            args: vec![],
+        });
+        let first = app.tabs.active.unwrap();
+        app.tabs
+            .configure(first, "Backend", Accent::Green, None)
+            .unwrap();
+        let identity = app.tabs.get(first).unwrap().identity.clone();
+        let template = app
+            .catalog
+            .save_tab(
+                &mut app.tabs,
+                first,
+                Template {
+                    id: TemplateId(0),
+                    identity,
+                    shell: TemplateShell::Bash,
+                    directory: "/tmp".into(),
+                    pinned: false,
+                },
+            )
+            .unwrap();
+        let _ = app.update(Message::Open(app.default_shell.clone()));
+        let active = app.tabs.active.unwrap();
+        let _ = app.update(Message::InspectTab(first));
+        let _ = app.update(Message::InspectAction(active, ui::TabAction::Pin));
+        assert_eq!(app.inspecting, Some(first));
+        assert!(!app.tabs.get(active).unwrap().pinned);
+        let _ = app.update(Message::InspectAction(first, ui::TabAction::Pin));
+        assert!(app.tabs.get(first).unwrap().pinned);
+        assert!(app.catalog.get(template).unwrap().pinned);
+        assert_eq!(app.tabs.active, Some(active));
+        let _ = app.update(Message::InspectAction(first, ui::TabAction::Pin));
+        assert!(app.tabs.get(first).unwrap().pinned); // A delayed panel click cannot toggle twice.
+        let _ = app.update(Message::InspectTab(first));
+        let _ = app.update(Message::InspectAction(first, ui::TabAction::Edit));
+        let _ = app.update(Message::EditName("Changed Backend".into()));
+        let _ = app.update(Message::StartShell(0));
+        let _ = app.update(Message::SelectTemplate(template));
+        assert!(!app.templates_open);
+        assert_eq!(app.tabs.items.len(), 2);
+        let window = window::Id::unique();
+        let _ = app.update(Message::WindowEvent(
+            window,
+            window::Event::Resized(iced::Size::new(640.0, 360.0)),
+        ));
+        assert_eq!((app.viewport_width, app.viewport_height), (640.0, 360.0));
+        let _ = app.update(Message::Resize(active, GridSize::new(62, 9)));
+        assert_eq!(
+            app.tabs.get(active).unwrap().terminal.size,
+            GridSize::new(62, 9)
+        );
+        let _ = app.update(Message::ApplyEdit);
+        assert_eq!(app.tabs.active, Some(active));
+        assert_eq!(app.tabs.get(first).unwrap().label(), "Changed Backend");
+        assert_eq!(app.catalog.get(template).unwrap().name(), "Changed Backend");
+        assert_eq!(app.tabs.get(first).unwrap().template, Some(template));
+        let _ = app.update(Message::SelectTemplate(template));
+        assert!(app.templates_open);
+        assert_eq!(app.selected_template, Some(template));
+        let _ = app.update(Message::EditTemplate(template));
+        let _ = app.update(Message::EditName("Discarded".into()));
+        let _ = app.update(Message::CancelEdit);
+        assert!(app.templates_open); // The template editor returns to its list context.
+        assert_eq!(app.catalog.get(template).unwrap().name(), "Changed Backend");
+        let _ = app.update(Message::ShowLaunch);
+        assert!(!app.templates_open);
+        assert_eq!(app.launching, Some(0));
+        assert_eq!(app.tabs.items.len(), 2);
+        let _ = app.update(Message::CancelLaunch);
+        let _ = app.update(Message::StartShell(usize::MAX));
+        assert_eq!(app.tabs.items.len(), 2);
+    }
+
+    #[test]
     fn direct_actions_and_editor_input_never_also_reach_the_pty() {
         let script = "import os,tty; tty.setraw(0); os.write(1,b'\x1b]2;ready\x07'); data=bytearray()\nwhile True:\n data.extend(os.read(0,4096)); os.write(1,b'\x1b]2;data-'+data.hex().encode()+b'\x07')";
         let mut app = App::new(Options {
@@ -3365,6 +2730,32 @@ mod tests {
             "data-7271"
         );
         assert_eq!(app.tabs.items.len(), 2);
+        let pinned = app.tabs.get(first).unwrap().pinned;
+        let _ = app.update(Message::InspectTab(first));
+        let _ = app.keyboard(
+            Key::Character("blocked".into()),
+            mods,
+            Some("blocked".into()),
+        );
+        let _ = app.update(Message::InspectAction(first, ui::TabAction::Pin));
+        assert_eq!(app.tabs.get(first).unwrap().pinned, !pinned);
+        assert_eq!(app.tabs.active, Some(second));
+        assert!(app.strip.focused.is_none());
+        let _ = app.keyboard(Key::Character("k".into()), mods, Some("k".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(second).unwrap().terminal.shell_title == "data-777a6b"
+        });
+        let _ = app.update(Message::ShowTemplates);
+        let _ = app.keyboard(Key::Character("j".into()), mods, Some("j".into()));
+        let _ = app.keyboard(Key::Named(keyboard::key::Named::Escape), mods, None);
+        let _ = app.keyboard(Key::Character("m".into()), mods, Some("m".into()));
+        wait(&mut app, |a| {
+            a.tabs.get(second).unwrap().terminal.shell_title == "data-777a6b6d"
+        });
+        assert_eq!(
+            app.tabs.get(first).unwrap().terminal.shell_title,
+            "data-7271"
+        );
     }
 
     #[test]
