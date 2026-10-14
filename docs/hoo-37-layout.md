@@ -63,7 +63,8 @@ real two-PTY routing regression also checks navigation/panel consumption and
 immediate active-PTY input after dismissal.
 
 `scripts/gui-layout-smoke.py` uses freshly spawned, PID-verified X11 windows,
-isolated synthetic configuration and only synthetic clipboard content. Its
+isolated synthetic configuration and only synthetic clipboard content. Control
+location additionally needs Tesseract (English OCR); OCR is not visual acceptance. Its
 bundled final-candidate run covers normal and minimum-size layouts, both real
 shells, explicit templates/drafts/conflicts, independent pin/compact/order,
 active/inactive output, resize/window operations, clipboard routing,

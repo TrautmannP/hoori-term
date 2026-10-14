@@ -2,7 +2,7 @@
 use super::*;
 use crate::appearance as colors;
 use iced::widget::{
-    button, column, container, row, scrollable, space, stack, text, text_input, tooltip,
+    button, column, container, pick_list, row, scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{Color, Element, Theme};
 
@@ -246,7 +246,7 @@ impl App {
                                 template.name()
                             ))
                             .size(13),
-                            text(format!("{} · {state}", template.shell.label())).size(11),
+                            text(format!("{} · {state}", template.target_label())).size(11),
                             text(shortcut).size(11),
                         ]
                         .spacing(2)
@@ -403,7 +403,7 @@ impl App {
             )
             .width(Fill)
             .on_press_maybe(
-                (interactive && self.templates_loaded && !cfg!(windows))
+                (interactive && self.templates_loaded)
                     .then(|| self.tabs.active.map(Message::SaveTemplate))
                     .flatten(),
             )
@@ -825,12 +825,42 @@ impl App {
                 .color(colors::MUTED),
             );
         if !matches!(editor.target, EditorTarget::Tab(_)) {
-            fields = fields.push(text("Startziel").size(12).color(colors::MUTED)).push(row![
-                button("zsh").width(Fill).on_press_maybe((!editor.recording).then_some(Message::EditShell(TemplateShell::Zsh))).style(if editor.shell == TemplateShell::Zsh { button::primary } else { colors::secondary }),
-                button("Bash").width(Fill).on_press_maybe((!editor.recording).then_some(Message::EditShell(TemplateShell::Bash))).style(if editor.shell == TemplateShell::Bash { button::primary } else { colors::secondary }),
-            ].spacing(8)).push(text("Startverzeichnis").size(12).color(colors::MUTED))
-                .push(text_input("Absolutes Startverzeichnis", &editor.directory).style(colors::input).id("template-directory").on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String) -> Message)).size(13).padding(8))
+            let selected = TemplateTarget {
+                shell: editor.shell,
+                distribution: editor.wsl_distribution.clone(),
+            };
+            let targets = self.template_targets();
+            let available = targets.contains(&selected);
+            let target: Element<'_, Message> = if editor.recording {
+                text(selected.to_string()).size(13).into()
+            } else {
+                pick_list(targets, Some(selected), Message::EditTemplateTarget)
+                    .width(Fill)
+                    .text_size(13)
+                    .padding(8)
+                    .into()
+            };
+            fields = fields.push(text("Startziel").size(12).color(colors::MUTED)).push(target)
+                .push(text("Startverzeichnis").size(12).color(colors::MUTED))
+                .push(text_input("Absolutes Startverzeichnis", &editor.directory).style(colors::input).id("template-directory")
+                    .on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String) -> Message)).size(13).padding(8))
                 .push(text("Startziel und Verzeichnis gelten beim nächsten Prozess. Offene Tabs bleiben erhalten.").size(11).color(colors::MUTED));
+            if !available {
+                fields = fields.push(text("Gespeichertes Ziel derzeit nicht verfügbar. Es bleibt erhalten; bei Bedarf bewusst ein anderes auswählen.").size(12).color(colors::ERROR));
+            }
+            fields = fields.push(
+                text(if editor.directory_request.is_some() {
+                    "Startverzeichnis wird im gewählten WSL-Ziel ermittelt …"
+                } else if editor.wsl_distribution.is_some() {
+                    "Linux-Pfad in dieser Distribution, z. B. /home/patrick/Projekte."
+                } else if cfg!(windows) {
+                    "Absoluter Windows-Pfad, z. B. C:\\Repos\\hoori-term."
+                } else {
+                    "Absoluter Linux-Pfad, z. B. /home/patrick/Projekte."
+                })
+                .size(11)
+                .color(colors::MUTED),
+            );
         }
         fields = fields
             .push(text("Darstellung").size(12).color(colors::MUTED))
@@ -892,9 +922,10 @@ impl App {
                     .width(Fill)
                     .on_press(Message::CancelEdit)
                     .style(colors::secondary),
-                button("Übernehmen")
-                    .width(Fill)
-                    .on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
+                button("Übernehmen").width(Fill).on_press_maybe(
+                    (!editor.recording && editor.directory_request.is_none())
+                        .then_some(Message::ApplyEdit)
+                ),
             ]
             .spacing(8),
         );
@@ -971,7 +1002,7 @@ impl App {
         };
         let action = |label, value| {
             let enabled = match value {
-                TabAction::Save => self.templates_loaded && !cfg!(windows),
+                TabAction::Save => self.templates_loaded,
                 TabAction::MoveLeft => can_move(false),
                 TabAction::MoveRight => can_move(true),
                 _ => true,

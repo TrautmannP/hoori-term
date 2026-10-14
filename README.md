@@ -32,9 +32,11 @@ such as `docker-desktop` that has no Bash leaves its error and exit status in
 its own tab; use **+** to select an Ubuntu distribution instead.
 
 Ctrl+Shift+T repeats the launch target; Ctrl+Shift+B opens target selection on
-Windows. Saved templates remain an Ubuntu feature pending their Windows
-integration. The shared tab features do not imply a completed Windows
-feature/platform qualification. See [Windows prototype validation](docs/hoo-11-windows.md).
+Windows. Saved templates offer PowerShell 5.1 and registered WSL-2 distributions
+with Bash/zsh and explicit start directories in the selected context.
+See [Windows template integration](docs/hoo-14-windows-templates.md) for storage,
+recovery and the qualification boundary. The shared tab features do not imply
+a completed Windows feature/platform qualification.
 Windows prefers Vulkan/D3D12; an explicit `WGPU_BACKEND` override is preserved.
 
 ```powershell

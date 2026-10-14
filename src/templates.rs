@@ -22,6 +22,8 @@ pub struct TemplateId(pub u64);
 pub enum TemplateShell {
     Zsh,
     Bash,
+    #[serde(rename = "powershell_51")]
+    PowerShell,
 }
 
 impl TemplateShell {
@@ -29,17 +31,40 @@ impl TemplateShell {
         match self {
             Self::Zsh => "zsh",
             Self::Bash => "Bash",
+            Self::PowerShell => "Windows PowerShell 5.1",
         }
     }
-    pub fn shell(self, directory: &str) -> Shell {
+    pub fn shell(self, directory: &str, distribution: Option<&str>) -> Shell {
+        if let Some(distribution) = distribution {
+            return crate::launch::wsl_in(
+                distribution,
+                if self == Self::Zsh {
+                    "/usr/bin/zsh"
+                } else {
+                    "/bin/bash"
+                },
+                directory,
+            );
+        }
         let mut shell = match self {
             Self::Zsh => Shell::zsh(),
             Self::Bash => Shell::bash(),
+            Self::PowerShell => crate::launch::powershell(),
         };
         shell.directory = Some(directory.into());
         shell
     }
     pub fn for_shell(shell: &Shell) -> Self {
+        if let Some((_, executable, _)) = crate::launch::wsl_context(shell) {
+            return if executable.ends_with("zsh") {
+                Self::Zsh
+            } else {
+                Self::Bash
+            };
+        }
+        if cfg!(windows) {
+            return Self::PowerShell;
+        }
         if Path::new(&shell.program)
             .file_name()
             .is_some_and(|n| n == "bash")
@@ -57,12 +82,20 @@ pub struct Template {
     pub id: TemplateId,
     pub identity: Identity,
     pub shell: TemplateShell,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl_distribution: Option<String>,
     pub directory: String,
     #[serde(default)]
     pub pinned: bool,
 }
 
 impl Template {
+    pub fn target_label(&self) -> String {
+        match &self.wsl_distribution {
+            Some(name) => format!("{name} · WSL 2 · {}", self.shell.label()),
+            None => self.shell.label().into(),
+        }
+    }
     pub fn name(&self) -> &str {
         self.identity.name.as_deref().unwrap_or("")
     }
@@ -71,8 +104,27 @@ impl Template {
         if name != self.name() {
             return Err("Vorlagenname enthält äußere Leerzeichen".into());
         }
+        if let Some(distribution) = &self.wsl_distribution {
+            if !cfg!(windows)
+                || self.shell == TemplateShell::PowerShell
+                || !crate::launch::valid_distribution(distribution)
+            {
+                return Err(
+                    "WSL-Ziel ist auf dieser Plattform ungültig oder nicht unterstützt".into(),
+                );
+            }
+        } else if (cfg!(windows) && self.shell != TemplateShell::PowerShell)
+            || (!cfg!(windows) && self.shell == TemplateShell::PowerShell)
+        {
+            return Err("Shell-Ziel ist auf dieser Plattform nicht unterstützt".into());
+        }
+        let absolute = if self.wsl_distribution.is_some() {
+            self.directory.starts_with('/')
+        } else {
+            Path::new(&self.directory).is_absolute()
+        };
         if self.directory.len() > MAX_DIRECTORY_BYTES
-            || !Path::new(&self.directory).is_absolute()
+            || !absolute
             || self.directory.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
             return Err("Startverzeichnis muss ein absoluter Pfad ohne Steuerzeichen sein (maximal 4096 Bytes)".into());
         }
@@ -427,7 +479,12 @@ impl Catalog {
         if let Some(shortcut) = &template.identity.shortcut {
             self.check_shortcut(tabs, Some(id), None, shortcut)?;
         }
-        let tab = tabs.open(&template.shell.shell(&template.directory), size)?;
+        let tab = tabs.open(
+            &template
+                .shell
+                .shell(&template.directory, template.wsl_distribution.as_deref()),
+            size,
+        )?;
         let source = tabs.get_mut(tab).unwrap();
         source.template = Some(id);
         source.identity = template.identity.clone();
@@ -543,6 +600,11 @@ pub struct Saved {
 
 impl TemplateFile {
     pub fn configured() -> Result<Self, String> {
+        #[cfg(windows)]
+        let root = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or("Kein lokales Windows-Konfigurationsverzeichnis verfügbar")?;
+        #[cfg(not(windows))]
         let root = match std::env::var_os("XDG_CONFIG_HOME") {
             Some(path) if Path::new(&path).is_absolute() => PathBuf::from(path),
             _ => PathBuf::from(
@@ -580,6 +642,13 @@ impl TemplateFile {
         let mut bytes = Vec::new();
         let mut options = OpenOptions::new();
         options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -588,6 +657,7 @@ impl TemplateFile {
         let file = options
             .open(&self.path)
             .map_err(|e| format!("Vorlagendatei kann nicht gelesen werden: {e}"))?;
+        reject_reparse_file(&file)?;
         if !file
             .metadata()
             .map_err(|e| format!("Vorlagendatei kann nicht geprüft werden: {e}"))?
@@ -617,6 +687,13 @@ impl TemplateFile {
             .map_err(|e| format!("Vorlagenverzeichnis kann nicht angelegt werden: {e}"))?;
         let mut options = OpenOptions::new();
         options.write(true).create(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -625,6 +702,7 @@ impl TemplateFile {
         let lock = options
             .open(self.path.with_extension("lock"))
             .map_err(|e| format!("Vorlagensperre fehlgeschlagen: {e}"))?;
+        reject_reparse_file(&lock)?;
         lock.try_lock()
             .map_err(|e| format!("Vorlagensperre nicht verfügbar: {e}"))?;
         if self.read()?.as_deref() != expected {
@@ -653,14 +731,22 @@ impl TemplateFile {
                 .map_err(|e| {
                     format!("Vorlagen konnten nicht vollständig geschrieben werden: {e}")
                 })?;
-            fs::rename(&temporary, &self.path)
-                .map_err(|e| format!("Vorlagendatei konnte nicht ersetzt werden: {e}"))?;
+            // Close the flushed temporary handle before Windows replacement.
+            drop(file);
+            #[cfg(windows)]
+            let replacement = crate::windows_fs::replace(&temporary, &self.path);
+            #[cfg(not(windows))]
+            let replacement = fs::rename(&temporary, &self.path);
+            replacement.map_err(|e| format!("Vorlagendatei konnte nicht ersetzt werden: {e}"))?;
+            #[cfg(not(windows))]
             let warning = File::open(parent)
                 .and_then(|f| f.sync_all())
                 .err()
                 .map(|e| {
                     format!("Datei ersetzt, dauerhafte Verzeichnisspeicherung fehlgeschlagen: {e}")
                 });
+            #[cfg(windows)]
+            let warning = None;
             Ok(Saved {
                 stamp: bytes,
                 warning,
@@ -671,4 +757,23 @@ impl TemplateFile {
         }
         result
     }
+}
+
+fn reject_reparse_file(file: &File) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err("Vorlagenpfad ist ein Reparsepunkt; Datei bleibt erhalten".into());
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = file;
+    Ok(())
 }
