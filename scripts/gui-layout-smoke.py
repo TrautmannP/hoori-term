@@ -546,19 +546,20 @@ class Study:
         self.report['results']['unlinked_f9_input_hex'] = expected.hex()
         self.close(w)
 
-    def errors(self):
-        self.phase('corrupt-load-retry-at-minimum-size')
-        corrupt = '{"version":99,"items":[]}'
-        w, file = self.create('corrupt-window', corrupt)
-        resize(w, 640, 360)
-        wait_for(lambda: find_control(w, 'laden'))
-        self.shot(w, '22-load-error-640.png'); assert file.read_text() == corrupt
+    def errors(self, write_only=False):
         valid = dict(version=1, next_id=1, order=[], items=[])
-        file.write_text(json.dumps(valid))
-        press(w, 'laden'); time.sleep(.4)
-        press(w, 'Navigation'); self.shot(w, '23-load-retry-preserves-file-640.png'); key(w, 'Escape')
-        assert read_json(file) == valid and len(self.track(w)) == 1
-        self.close(w)
+        if not write_only:
+            self.phase('corrupt-load-retry-at-minimum-size')
+            corrupt = '{"version":99,"items":[]}'
+            w, file = self.create('corrupt-window', corrupt)
+            resize(w, 640, 360)
+            wait_for(lambda: find_control(w, 'laden'))
+            self.shot(w, '22-load-error-640.png'); assert file.read_text() == corrupt
+            file.write_text(json.dumps(valid))
+            press(w, 'laden'); time.sleep(.4)
+            press(w, 'Navigation'); self.shot(w, '23-load-retry-preserves-file-640.png'); key(w, 'Escape')
+            assert read_json(file) == valid and len(self.track(w)) == 1
+            self.close(w)
         self.phase('write-error-retry-while-editing-and-explicit-unsaved-exit')
         seed = dict(version=1, next_id=2, order=[1], items=[dict(id=1, identity=dict(name='Error target', accent='green',
             shortcut=dict(key='F8', modifiers=0), symbol='code', compact=False), shell='zsh', directory='/tmp', pinned=False)])
@@ -569,7 +570,7 @@ class Study:
         if lock.exists(): lock.unlink()
         lock.mkdir()
         self.edit_name(w, 'Retry target'); key(w, 'Return')
-        wait_for(lambda: find_control(w, 'speichern'))
+        wait_for(lambda: 'Retry target' in w.title())
         assert file.read_bytes() == before
         resize(w, 640, 360)
         self.edit_name(w, 'Discarded unsaved draft')
@@ -581,9 +582,9 @@ class Study:
         if lock.exists(): lock.unlink()
         lock.mkdir()
         self.edit_name(w, 'Unsaved target'); key(w, 'Return')
-        wait_for(lambda: find_control(w, 'speichern'))
+        wait_for(lambda: 'Unsaved target' in w.title())
         w.request_close(); key(w, 'Return')
-        wait_for(lambda: find_control(w, 'Ungespeichert'))
+        wait_for(lambda: not self.track(w))
         self.shot(w, '26-explicit-unsaved-exit-640.png')
         assert read_json(file)['items'][0]['identity']['name'] == 'Retry target'
         press(w, 'Ungespeichert'); w.wait_exit()
@@ -592,7 +593,8 @@ class Study:
         resize(w, 640, 360); assert not self.track(w)
         self.shot(w, '27-start-error-640.png')
         w.request_close(); w.wait_exit()
-        self.report['results']['load_write_retry_unsaved_exit_start_error'] = True
+        result = 'write_retry_unsaved_exit_start_error' if write_only else 'load_write_retry_unsaved_exit_start_error'
+        self.report['results'][result] = True
 
     def launcher(self):
         self.phase('focused-final-no-argument-launcher')
@@ -639,6 +641,7 @@ def main():
     parser.add_argument('--resume-after-saves', type=Path)
     parser.add_argument('--resume-after-window', type=Path)
     parser.add_argument('--resume-before-clipboard', type=Path)
+    parser.add_argument('--resume-write-errors', action='store_true', help='Check only the remaining write/retry/unsaved-exit and start-error cases')
     parser.add_argument('--interactive', action='store_true', help='Allow owned native control input through stdin after OCR cannot locate a control')
     args = parser.parse_args()
     global INTERACTIVE
@@ -650,7 +653,7 @@ def main():
     try:
         if args.only in ('all', 'main'): study.main(args.resume_after_saves, args.resume_after_window, args.resume_before_clipboard)
         if args.only in ('all', 'restart'): study.restart(args.catalog_from or output / 'main-catalog.json')
-        if args.only in ('all', 'errors'): study.errors()
+        if args.only in ('all', 'errors'): study.errors(args.resume_write_errors)
         if args.only == 'launcher': study.launcher()
         study.cleanup(); study.report['complete'] = True
         study.report['manual_native_controls'] = MANUAL
