@@ -44,7 +44,9 @@ build tools. The review executable itself does not require Rust.
 Ubuntu prerequisites: Rust 1.98.1 (pinned by `rust-toolchain.toml`), a C linker,
 Ubuntu desktop with X11 or Wayland libraries and a working Vulkan/OpenGL driver,
 monospace fonts, and zsh (`/usr/bin/zsh`). The verified environment is Ubuntu
-24.04.5 x86_64 with X11; native Wayland and the full Windows matrix remain pending.
+24.04.5 x86_64 with X11, the current Ubuntu qualification baseline. Additional
+native Wayland qualification is deferred; Windows has its separate
+[WSL/PowerShell matrix](docs/hoo-12-windows-matrix.md).
 
 ```sh
 cargo run --locked
@@ -186,8 +188,10 @@ There is deliberately no GitHub CI pipeline. See [the spike evidence](docs/hoo-6
 for the GUI validation procedure, actual observations and integration limits.
 The [multi-session validation](docs/hoo-7-sessions.md) covers the follow-up
 tests and X11 GUI/clipboard exercise. The [tab-identity validation](docs/hoo-8-identity.md)
-covers editing, conflicts and direct shortcut routing. Native Wayland and Windows runtime
-evidence remain separate gates.
+covers editing, conflicts and direct shortcut routing. The current
+[Ubuntu/X11 qualification](docs/hoo-10-ubuntu-x11.md) covers both Bash and zsh
+on the same source commit. Native Wayland is deferred; Windows runtime evidence
+is tracked separately.
 The [refresh comparison](docs/hoo-15-refresh-comparison.md) records the bounded
 HOO-15 `top`/GNOME investigation, raw evidence, timing limits and follow-up proposal.
 The [connected tab-strip validation](docs/hoo-19-tab-strip.md) describes the
@@ -214,7 +218,7 @@ After merging, check out the final `main` commit with a clean worktree, then:
 ```
 
 The script builds with the lockfile, validates the embedded identity and
-publishes a binary, `launch`, `.desktop` launcher and `BUILD-METADATA.txt` to
+publishes a binary, `launch`, `.desktop` launcher, README/documentation and `BUILD-METADATA.txt` to
 `/home/patrick/Projekte/hoori-term-builds/<full-commit>/`. Existing builds are
 preserved. Run the absolute `launch` path printed by the script from any
 directory. The `.desktop` file can be opened with `gio launch` or installed
