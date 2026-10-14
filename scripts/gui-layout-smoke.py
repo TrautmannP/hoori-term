@@ -70,7 +70,7 @@ def key(w, value):
     w.key(value)
     # xdotool returns before the native event/frame has completed. Give modal
     # replacement and iced focus/scroll operations a frame before the next key.
-    time.sleep(.08)
+    time.sleep(.2)
 
 
 def wheel(w, direction, count=6, panel=True):
@@ -200,9 +200,7 @@ class Study:
             press(w, 'zsh', panel=True, scroll=True); press(w, 'Bash', panel=True)
             press(w, 'Bash', panel=True); press(w, 'zsh', panel=True)
             assert 'Als Vorlage speichern' in w.title() and self.track(w) == before
-        key(w, 'F6'); key(w, 'Home')
-        for _ in range(symbol_index): key(w, 'Right')
-        key(w, 'Return')
+        self.choose_symbol(w, symbol_index)
         self.capture(w, shortcut)
         if compact: key(w, 'F7')
         self.shot(w, f'save-{shortcut.lower()}-draft.png')
@@ -214,6 +212,14 @@ class Study:
         assert template['directory'] == str(directory)
         assert template['identity']['shortcut']['key'] == shortcut
         return template['id']
+
+    def choose_symbol(self, w, index):
+        key(w, 'F6')
+        wait_for(lambda: find_control(w, 'Tab-Symbol', panel=True))
+        key(w, 'Home')
+        for _ in range(index): key(w, 'Right')
+        key(w, 'Return')
+        wait_for(lambda: find_control(w, 'Aufnehmen', panel=True))
 
     def details(self, w):
         key(w, 'ctrl+shift+l'); key(w, 'i')
@@ -280,7 +286,7 @@ class Study:
         self.activate(w, 'F10', 'Scratch'); active_raw = self.raw(w, 'raw-scratch', 1)
         runtime = ("\x1b]2;HOO37 long CLI;" + "界-title;" * 30 + "\x07"
                    "\x1b]7501;state=blocked:kind=permission:app=fixture:progress=42\x07"
-                   "\x1b]7501;state=error:id=child:message=bGF5b3V0IGZpeHR1cmU=\x07").encode()
+                   "\x1b]7501;state=error:id=child:msg=bGF5b3V0IGZpeHR1cmU=\x07").encode()
         self.control(backend_raw, 'emit', bytes=base64.b64encode(runtime).decode())
         self.shot(w, '02-mixed-tabs-1000.png')
         self.phase('inactive-id-editor-conflicts-and-responsive-panels')
@@ -307,7 +313,7 @@ class Study:
         press(w, 'Bearbeiten', panel=True, scroll=True)
         wait_for(lambda: 'Tab bearbeiten' in w.title() and 'Scratch' in w.title())
         key(w, 'ctrl+a'); w.type('Backend Grüße long stable identity'.ljust(40, 'x'))
-        key(w, 'F6'); key(w, 'End'); key(w, 'Return'); key(w, 'F7')
+        self.choose_symbol(w, 8); key(w, 'F7')
         self.shot(w, '08-inline-editor-1280.png')
         sizes_inline = read_json(active_raw / 'proof.json')['sizes']
         assert sizes_inline[-1]['columns'] == (1280 - 196 - 320 - 20) // 10
