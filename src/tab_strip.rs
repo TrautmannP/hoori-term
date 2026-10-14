@@ -13,11 +13,11 @@ pub const HEIGHT: f32 = 52.0;
 const TAB_WIDTH: f32 = 224.0;
 const COMPACT_WIDTH: f32 = 104.0;
 const GROUP_GAP: f32 = 12.0;
-const BAR: Color = Color::from_rgb8(16, 18, 27);
-const HOVER: Color = Color::from_rgb8(31, 34, 48);
-const TEXT: Color = Color::from_rgb8(219, 224, 239);
-const MUTED: Color = Color::from_rgb8(151, 161, 187);
-const FOCUS: Color = Color::from_rgb8(125, 210, 245);
+const BAR: Color = crate::appearance::NAVIGATION;
+const HOVER: Color = crate::appearance::RAISED;
+const TEXT: Color = crate::appearance::TEXT;
+const MUTED: Color = crate::appearance::MUTED;
+const FOCUS: Color = crate::appearance::ACCENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -513,7 +513,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
             background.fill_rectangle(
                 Point::new(0.0, HEIGHT - 1.0),
                 Size::new(bounds.width, 1.0),
-                Color::from_rgb8(49, 54, 75),
+                crate::appearance::LINE,
             );
         });
         frame.with_clip(layout.viewport, |frame| {
@@ -547,7 +547,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     } else if hovered {
                         HOVER
                     } else if tab.pinned {
-                        Color::from_rgb8(24, 28, 41)
+                        crate::appearance::PANEL
                     } else {
                         BAR
                     },
@@ -557,7 +557,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                         &shape,
                         Stroke::default()
                             .with_width(1.0)
-                            .with_color(Color::from_rgb8(76, 84, 112)),
+                            .with_color(crate::appearance::LINE),
                     );
                     // Open the bottom border into the terminal's surface.
                     frame.fill_rectangle(
@@ -569,7 +569,7 @@ impl canvas::Program<Message> for TabStrip<'_> {
                     frame.fill_rectangle(
                         Point::new(rect.x + rect.width - 1.0, 20.0),
                         Size::new(1.0, 20.0),
-                        Color::from_rgb8(49, 54, 75),
+                        crate::appearance::LINE,
                     );
                 }
                 let [r, g, b] = tab.identity.accent.rgb();
