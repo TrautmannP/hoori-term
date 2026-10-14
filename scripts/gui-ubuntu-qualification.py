@@ -227,6 +227,12 @@ class Qualification:
                 f"printf '\\033]2;HOO10 {role}-ready\\007'")
         wait_for(lambda: f"HOO10 {role}-ready" in w.title())
 
+    def first_command(self, w, folder):
+        proof = folder / "first-command.txt"
+        send(w, "printf '%s\\n' HOO10_FIRST_COMMAND | tee " + shlex.quote(str(proof)))
+        wait_for(lambda: proof.exists() and proof.read_bytes() == b"HOO10_FIRST_COMMAND\n")
+        return str(proof.relative_to(self.output))
+
     def marker(self, w, marker):
         send(w, f"printf '\\033]2;{marker}\\007'")
         wait_for(lambda: marker in w.title())
@@ -242,6 +248,7 @@ class Qualification:
             pids = self.children(w)
             assert len(pids) == 1
             assert Path(f"/proc/{pids[0]}/exe").resolve() == Path("/usr/bin/zsh").resolve()
+            first_command = self.first_command(w, folder)
             self.clean_prompt(w, "zsh", "DEFAULT")
             self.shot(w, folder / "01-default-launch.png")
             if normal:
@@ -250,9 +257,11 @@ class Qualification:
                 assert "Owned HOO-10 terminal fixture" not in stderr
                 self.report["ordinary_default_launch"] = {"shell_pid": pids[0],
                     "graphics_diagnostics_enabled": False, "stderr_bytes": len(stderr.encode()),
-                    "synthetic_terminal_content_not_logged": True, "title": w.title()}
+                    "synthetic_terminal_content_not_logged": True, "title": w.title(),
+                    "first_command_proof": first_command}
             else:
                 self.report["graphics_probe"] = self.graphics(w)
+                self.report["graphics_probe"]["first_command_proof"] = first_command
             w.request_close()
             assert w.process.poll() is None
             w.key("Escape")
@@ -266,6 +275,38 @@ class Qualification:
                 os.environ.pop("HOORI_GRAPHICS_INFO", None)
             else:
                 os.environ["HOORI_GRAPHICS_INFO"] = old
+
+    def startup_probe(self):
+        self.phase("menu-zsh-startup")
+        folder = self.output / "menu-startup"
+        w = self.create(folder, "bash")
+        before = self.children(w)
+        assert len(before) == 1
+        w.key("ctrl+shift+l")
+        w.key("End")
+        w.key("Tab")
+        w.key("Tab")
+        w.key("Return")
+        wait_for(lambda: "Neue Sitzung" in w.title())
+        assert self.children(w) == before
+        w.key("Return")  # Explicitly select zsh, initially focused.
+        wait_for(lambda: "zsh · 2" in w.title())
+        pids = self.children(w)
+        assert len(pids) == 2
+        pid = (set(pids) - set(before)).pop()
+        assert Path(f"/proc/{pid}/exe").resolve() == Path("/usr/bin/zsh").resolve()
+        first_command = self.first_command(w, folder)
+        self.shot(w, folder / "01-menu-zsh-first-command.png")
+        self.clean_prompt(w, "zsh", "MENU")
+        self.report["menu_zsh_first_command"] = {"shell_pid": pid,
+            "first_command_proof": first_command, "graphics": self.graphics(w)}
+        w.request_close()
+        w.key("Escape")
+        assert self.children(w) == pids
+        w.request_close()
+        w.key("Return")
+        w.wait_exit()
+        wait_for(lambda: all(start_time(pid) != self.owned[pid] for pid in pids))
 
     def shell_row(self, shell):
         self.phase(shell + "-row-start")
@@ -559,7 +600,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--only", choices=["all", "graphics", "zsh", "bash", "default", "errors"],
+    parser.add_argument("--only", choices=["all", "graphics", "zsh", "bash", "default", "errors", "startup"],
                         default="all")
     args = parser.parse_args()
     assert os.environ.get("XDG_SESSION_TYPE") == "x11", "This harness proves the native X11 baseline only"
@@ -569,6 +610,9 @@ def main():
     config, zdot = output / "config", output / "zsh-config"
     config.mkdir()
     zdot.mkdir()
+    # An empty directory alone invokes zsh-newuser-install and can consume
+    # the first fixture byte. Only this fresh, owned profile is initialized.
+    (zdot / ".zshrc").write_text("")
     # These are isolated fixture directories, never the user's configuration.
     before = {key: os.environ.get(key) for key in ("XDG_CONFIG_HOME", "ZDOTDIR", "HOORI_GRAPHICS_INFO")}
     os.environ.update(XDG_CONFIG_HOME=str(config), ZDOTDIR=str(zdot), HOORI_GRAPHICS_INFO="1")
@@ -577,7 +621,7 @@ def main():
     q.report["fixture_environment"] = {"XDG_CONFIG_HOME": str(config), "ZDOTDIR": str(zdot),
                                        "HOORI_GRAPHICS_INFO": "1"}
     try:
-        if args.only in ("all", "graphics"):
+        if args.only in ("all", "graphics", "startup"):
             q.default_probe()
         if args.only in ("all", "zsh"):
             q.shell_row("zsh")
@@ -585,7 +629,9 @@ def main():
             q.shell_row("bash")
         if args.only in ("all", "errors"):
             q.errors()
-        if args.only in ("all", "graphics", "default"):
+        if args.only in ("all", "startup"):
+            q.startup_probe()
+        if args.only in ("all", "graphics", "default", "startup"):
             q.default_probe(normal=True)
         q.finish()
     except BaseException as error:
