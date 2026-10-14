@@ -59,6 +59,13 @@ def clipboard(value):
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def field_value(w, value):
+    # Native text-input paste avoids xdotool's temporary Unicode XKB mappings.
+    # The generated value is the only clipboard content read by this action.
+    clipboard(str(value))
+    key(w, 'ctrl+v')
+
+
 def send(w, value):
     clipboard(value)
     key(w, 'ctrl+shift+v')
@@ -191,7 +198,7 @@ class Study:
     def edit_name(self, w, label):
         key(w, 'ctrl+shift+e')
         wait_for(lambda: 'Tab bearbeiten' in w.title())
-        key(w, 'ctrl+a'); w.type(label)
+        key(w, 'ctrl+a'); field_value(w, label)
 
     def capture(self, w, shortcut):
         wheel(w, 4, 30)
@@ -201,8 +208,8 @@ class Study:
     def save(self, w, file, name, directory, shortcut, symbol_index, compact=False):
         before = self.track(w)
         key(w, 'ctrl+shift+s'); wait_for(lambda: 'Als Vorlage speichern' in w.title())
-        key(w, 'ctrl+a'); w.type(name)
-        key(w, 'Tab'); key(w, 'ctrl+a'); w.type(str(directory))
+        key(w, 'ctrl+a'); field_value(w, name)
+        key(w, 'Tab'); key(w, 'ctrl+a'); field_value(w, directory)
         if shortcut == 'F8':
             wheel(w, 4, 30)
             press(w, 'zsh', panel=True, scroll=True); press(w, 'Bash', panel=True)
@@ -236,7 +243,7 @@ class Study:
     def raw(self, w, folder, tab):
         root = self.output / folder
         root.mkdir()
-        send(w, 'python3 ' + shlex.quote(str(self.raw_script)) + ' ' + shlex.quote(str(root)) + ' ' + str(tab))
+        send(w, 'unset HISTFILE; python3 ' + shlex.quote(str(self.raw_script)) + ' ' + shlex.quote(str(root)) + ' ' + str(tab))
         wait_for(lambda: read_json(root / 'proof.json') and f'HOO37 raw-{tab}' in w.title())
         proof = read_json(root / 'proof.json')
         self.owned[proof['pid']] = start_time(proof['pid'])
@@ -258,30 +265,63 @@ class Study:
             key(w, 'Return')
         w.wait_exit()
 
-    def main(self):
+    def main(self, resume=None):
         self.phase('main-native-shell-starts-and-explicit-save')
-        extras = [dict(id=i, identity=dict(name=('Long duplicate review session' if i < 3 else f'Long saved template {i:02}').ljust(40, 'x'),
-                   accent='blue', shortcut=None, symbol='folder', compact=False), shell='zsh', directory='/tmp', pinned=False) for i in range(1, 11)]
-        seed = dict(version=1, next_id=11, order=list(range(1, 11)), items=extras)
-        w, file = self.create('main-window', seed)
-        assert len(self.track(w)) == 1
-        self.shot(w, '01-working-1000.png')
-        first = self.track(w)[0]
-        click(w, 95, 214); wait_for(lambda: 'bash · 2' in w.title())
-        bash_pid = next(p for p in self.track(w) if p != first)
-        bash_before = os.readlink(f'/proc/{bash_pid}/cwd')
-        admin_dir = self.output / 'Bash space ; literal $(data)'
-        backend_dir = self.output / 'zsh Grüße ; literal $(data)'
-        admin_dir.mkdir(); backend_dir.mkdir()
-        admin = self.save(w, file, 'Admin', admin_dir, 'F9', 4, True)
-        self.details(w); press(w, 'Anpinnen', panel=True, scroll=True)
-        wait_for(lambda: next(t for t in read_json(file)['items'] if t['id'] == admin)['pinned'])
-        assert os.readlink(f'/proc/{bash_pid}/cwd') == bash_before
-        click(w, 95, 178); wait_for(lambda: 'zsh · 3' in w.title())
-        zsh_pid = next(p for p in self.track(w) if p not in [first, bash_pid])
-        zsh_before = os.readlink(f'/proc/{zsh_pid}/cwd')
-        backend = self.save(w, file, 'Backend', backend_dir, 'F8', 2)
-        assert os.readlink(f'/proc/{zsh_pid}/cwd') == zsh_before
+        if resume:
+            seed = read_json(resume)
+            assert seed and len(seed['items']) == 12
+            admin_template = next(t for t in seed['items'] if t['identity']['shortcut'] and t['identity']['shortcut']['key'] == 'F9')
+            backend_template = next(t for t in seed['items'] if t['identity']['shortcut'] and t['identity']['shortcut']['key'] == 'F8')
+            admin, backend = admin_template['id'], backend_template['id']
+            admin_dir = Path(admin_template['directory'])
+            backend_dir = self.output / 'zsh Grüße ; literal $(data)'
+            backend_dir.mkdir()
+            w, file = self.create('main-window', seed)
+            first = self.track(w)[0]
+            assert len(self.track(w)) == 1
+            self.activate(w, 'F9', 'Admin')
+            bash_pid = next(p for p in self.track(w) if p != first)
+            assert os.readlink(f'/proc/{bash_pid}/cwd') == str(admin_dir)
+            before = self.track(w)
+            key(w, 'ctrl+shift+p'); key(w, 'End'); key(w, 'e')
+            wait_for(lambda: 'Vorlage bearbeiten' in w.title())
+            key(w, 'Tab'); key(w, 'ctrl+a'); field_value(w, backend_dir)
+            press(w, 'Übernehmen', panel=True)
+            wait_for(lambda: next(t for t in read_json(file)['items'] if t['id'] == backend)['directory'] == str(backend_dir))
+            key(w, 'Escape')
+            assert self.track(w) == before
+            self.activate(w, 'F8', 'Backend')
+            zsh_pid = next(p for p in self.track(w) if p not in [first, bash_pid])
+            assert os.readlink(f'/proc/{zsh_pid}/cwd') == str(backend_dir)
+            self.shot(w, '01b-utf8-directory-corrected-and-opened.png')
+            self.report['results']['remaining_after_saves'] = {
+                'source_catalog': str(resume), 'scope': 'Native backend path edit via text-input paste, deliberate reopen, then remaining main scenarios. Initial saves belong to the named earlier report.',
+                'corrected_backend_directory': str(backend_dir), 'saved_ids_retained': [admin, backend],
+                'actual_shell_cwds': {str(bash_pid): str(admin_dir), str(zsh_pid): str(backend_dir)},
+            }
+        else:
+            extras = [dict(id=i, identity=dict(name=('Long duplicate review session' if i < 3 else f'Long saved template {i:02}').ljust(40, 'x'),
+                       accent='blue', shortcut=None, symbol='folder', compact=False), shell='zsh', directory='/tmp', pinned=False) for i in range(1, 11)]
+            seed = dict(version=1, next_id=11, order=list(range(1, 11)), items=extras)
+            w, file = self.create('main-window', seed)
+            assert len(self.track(w)) == 1
+            self.shot(w, '01-working-1000.png')
+            first = self.track(w)[0]
+            click(w, 95, 214); wait_for(lambda: 'bash · 2' in w.title())
+            bash_pid = next(p for p in self.track(w) if p != first)
+            bash_before = os.readlink(f'/proc/{bash_pid}/cwd')
+            admin_dir = self.output / 'Bash space ; literal $(data)'
+            backend_dir = self.output / 'zsh Grüße ; literal $(data)'
+            admin_dir.mkdir(); backend_dir.mkdir()
+            admin = self.save(w, file, 'Admin', admin_dir, 'F9', 4, True)
+            self.details(w); press(w, 'Anpinnen', panel=True, scroll=True)
+            wait_for(lambda: next(t for t in read_json(file)['items'] if t['id'] == admin)['pinned'])
+            assert os.readlink(f'/proc/{bash_pid}/cwd') == bash_before
+            click(w, 95, 178); wait_for(lambda: 'zsh · 3' in w.title())
+            zsh_pid = next(p for p in self.track(w) if p not in [first, bash_pid])
+            zsh_before = os.readlink(f'/proc/{zsh_pid}/cwd')
+            backend = self.save(w, file, 'Backend', backend_dir, 'F8', 2)
+            assert os.readlink(f'/proc/{zsh_pid}/cwd') == zsh_before
         self.activate(w, 'F8', 'Backend'); self.activate(w, 'F9', 'Admin')
         assert len(self.track(w)) == 3
         key(w, 'ctrl+Tab')
@@ -304,7 +344,7 @@ class Study:
         key(w, 'End'); self.shot(w, '03b-full-cli-details.png'); key(w, 'Home')
         press(w, 'Bearbeiten', panel=True, scroll=True)
         wait_for(lambda: 'Tab bearbeiten' in w.title())
-        key(w, 'ctrl+a'); w.type('Discarded draft')
+        key(w, 'ctrl+a'); field_value(w, 'Discarded draft')
         self.capture(w, 'F9'); self.shot(w, '04-duplicate-shortcut-visible.png')
         key(w, 'ctrl+shift+t'); self.shot(w, '05-reserved-shortcut-visible.png')
         key(w, 'Escape'); assert 'Tab bearbeiten' in w.title()
@@ -320,7 +360,7 @@ class Study:
         key(w, 'ctrl+shift+l'); key(w, 'End'); key(w, 'i')
         press(w, 'Bearbeiten', panel=True, scroll=True)
         wait_for(lambda: 'Tab bearbeiten' in w.title() and 'Scratch' in w.title())
-        key(w, 'ctrl+a'); w.type('Backend Grüße long stable identity'.ljust(40, 'x'))
+        key(w, 'ctrl+a'); field_value(w, 'Backend Grüße long stable identity'.ljust(40, 'x'))
         self.choose_symbol(w, 8); key(w, 'F7')
         self.shot(w, '08-inline-editor-1280.png')
         sizes_inline = read_json(active_raw / 'proof.json')['sizes']
@@ -371,8 +411,8 @@ class Study:
         self.shot(w, '14-selection-640.png')
         press(w, 'Kopieren')
         wait_for(lambda: command('xclip', '-selection', 'clipboard', '-out') == 'HOO37_SELECTION')
-        clipboard('LAYOUT_ONLY\nzweite'); press(w, 'Einfügen'); w.type('ok!')
-        expected = b'\x1b[200~LAYOUT_ONLY\nzweite\x1b[201~ok!'
+        clipboard('LAYOUT Grüße 界\nzweite'); press(w, 'Einfügen'); w.type('ok!')
+        expected = '\x1b[200~LAYOUT Grüße 界\nzweite\x1b[201~ok!'.encode()
         wait_for(lambda: read_json(active_raw / 'proof.json')['input_hex'] == expected.hex())
         assert read_json(backend_raw / 'proof.json')['input_hex'] == ''
         assert read_json(admin_raw / 'proof.json')['input_hex'] == ''
@@ -518,13 +558,14 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--only', choices=['all', 'main', 'restart', 'errors', 'launcher'], default='all')
     parser.add_argument('--catalog-from', type=Path)
+    parser.add_argument('--resume-after-saves', type=Path)
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11'
     assert shutil.which('tesseract'), 'Control location uses Tesseract, not an existing desktop window'
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
     study = Study(args.binary.resolve(), output)
     try:
-        if args.only in ('all', 'main'): study.main()
+        if args.only in ('all', 'main'): study.main(args.resume_after_saves)
         if args.only in ('all', 'restart'): study.restart(args.catalog_from or output / 'main-catalog.json')
         if args.only in ('all', 'errors'): study.errors()
         if args.only == 'launcher': study.launcher()
