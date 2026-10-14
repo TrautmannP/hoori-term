@@ -288,7 +288,9 @@ class Study:
             key(w, 'Return')
         w.wait_exit()
 
-    def main(self, resume=None, after_window=None):
+    def main(self, resume=None, after_window=None, before_clipboard=None):
+        if before_clipboard:
+            return self.resume_window(before_clipboard, clipboard_only=True)
         if after_window:
             return self.resume_window(after_window)
         self.phase('main-native-shell-starts-and-explicit-save')
@@ -414,7 +416,7 @@ class Study:
         key(w, 'ctrl+shift+l'); key(w, 'Right'); key(w, 'alt+Left'); key(w, 'Escape')
         self.finish_main(w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir)
 
-    def resume_window(self, source):
+    def resume_window(self, source, clipboard_only=False):
         self.phase('remaining-native-window-clipboard-history-close')
         seed = read_json(source)
         admin_template = next(t for t in seed['items'] if t['identity']['shortcut'] and t['identity']['shortcut']['key'] == 'F9')
@@ -437,42 +439,44 @@ class Study:
         self.control(admin_raw, 'load', count=3000)
         self.report['results']['remaining_after_window'] = {
             'source_catalog': str(source),
-            'scope': 'Fresh owned sessions for the remaining minimize/return, close, clipboard, history and restart/error cases. Earlier editing/inactive-output/drag/resize/maximize assertions belong to their original report.',
+            'scope': ('Remaining clipboard/history/window-close/restart/error cases only; earlier native window operations are inherited.' if clipboard_only else 'Fresh owned sessions for the remaining minimize/return, close, clipboard, history and restart/error cases. Earlier editing/inactive-output/drag/resize/maximize assertions belong to their original report.'),
         }
-        self.finish_main(w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=False)
+        self.finish_main(w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=False, clipboard_only=clipboard_only)
 
-    def finish_main(self, w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=True):
-        self.phase('native-window-operations-and-real-pty-sizes')
-        resize(w, 1000, 700)
-        if native_prefix:
-            before, after = drag(w, 804, 26, 35, 20)
-            assert (after['X'], after['Y']) != (before['X'], before['Y'])
-            before, after = drag(w, 998, 350, -40, 0)
-            assert after['WIDTH'] < before['WIDTH']
-            self.report['results']['native_drag_resize'] = [before, after]
-        resize(w, 640, 360)
-        self.activate(w, 'F9', 'Admin'); self.details(w)
-        press(w, 'bewusst', panel=True, scroll=True)
-        wait_for(lambda: 'Schließen bestätigen' in w.title())
-        self.shot(w, '13b-explicit-pinned-close-target-640.png')
-        key(w, 'Escape'); assert len(self.track(w)) == 3
-        self.activate(w, 'F8', 'Backend'); key(w, 'ctrl+shift+w')
-        wait_for(lambda: 'Schließen bestätigen' in w.title())
-        self.shot(w, '13c-ordinary-close-target-640.png')
-        key(w, 'Escape'); assert len(self.track(w)) == 3
-        self.activate(w, 'F10', 'Scratch'); resize(w, 1000, 700)
-        self.report['results']['named_individual_pin_and_ordinary_cancel_preserve_all_sessions'] = True
-        self.edit_name(w, 'Window draft')
-        if native_prefix:
-            click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: maximized(w))
-            click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: not maximized(w))
-            self.report['results']['native_maximize_restore'] = True
-        click(w, geometry(w)['WIDTH'] - 98, 26); wait_for(lambda: 'HIDDEN' in native_state(w))
-        command('xdotool', 'windowactivate', '--sync', w.id); wait_for(lambda: 'HIDDEN' not in native_state(w)); w.focus()
-        assert 'Tab bearbeiten' in w.title()
-        w.request_close(); assert 'Schließen bestätigen' in w.title(); key(w, 'Escape')
-        assert 'Tab bearbeiten' in w.title(); key(w, 'Escape')
-        self.report['results']['native_minimize_os_return_and_modal_close_cancel'] = True
+    def finish_main(self, w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=True, clipboard_only=False):
+        if not clipboard_only:
+            self.phase('native-window-operations-and-real-pty-sizes')
+            resize(w, 1000, 700)
+            if native_prefix:
+                before, after = drag(w, 804, 26, 35, 20)
+                assert (after['X'], after['Y']) != (before['X'], before['Y'])
+                before, after = drag(w, 998, 350, -40, 0)
+                assert after['WIDTH'] < before['WIDTH']
+                self.report['results']['native_drag_resize'] = [before, after]
+            resize(w, 640, 360)
+            self.activate(w, 'F9', 'Admin'); self.details(w)
+            press(w, 'bewusst', panel=True, scroll=True)
+            wait_for(lambda: 'Schließen bestätigen' in w.title())
+            self.shot(w, '13b-explicit-pinned-close-target-640.png')
+            key(w, 'Escape'); assert len(self.track(w)) == 3
+            self.activate(w, 'F8', 'Backend'); key(w, 'ctrl+shift+w')
+            wait_for(lambda: 'Schließen bestätigen' in w.title())
+            self.shot(w, '13c-ordinary-close-target-640.png')
+            key(w, 'Escape'); assert len(self.track(w)) == 3
+            self.activate(w, 'F10', 'Scratch'); resize(w, 1000, 700)
+            self.report['results']['named_individual_pin_and_ordinary_cancel_preserve_all_sessions'] = True
+            self.edit_name(w, 'Window draft')
+            if native_prefix:
+                click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: maximized(w))
+                click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: not maximized(w))
+                self.report['results']['native_maximize_restore'] = True
+            click(w, geometry(w)['WIDTH'] - 98, 26); wait_for(lambda: 'HIDDEN' in native_state(w))
+            command('xdotool', 'windowactivate', '--sync', w.id); wait_for(lambda: 'HIDDEN' not in native_state(w)); w.focus()
+            assert 'Tab bearbeiten' in w.title()
+            w.request_close(); assert 'Schließen bestätigen' in w.title(); key(w, 'Escape')
+            assert 'Tab bearbeiten' not in w.title()
+            assert self.track(w) == sorted([first, bash_pid, zsh_pid])
+            self.report['results']['native_minimize_os_return_and_modal_close_cancel'] = True
         resize(w, 640, 600)
         self.control(active_raw, 'paint')
         clipboard('HOO37 synthetic pre-copy fixture')
@@ -634,6 +638,7 @@ def main():
     parser.add_argument('--catalog-from', type=Path)
     parser.add_argument('--resume-after-saves', type=Path)
     parser.add_argument('--resume-after-window', type=Path)
+    parser.add_argument('--resume-before-clipboard', type=Path)
     parser.add_argument('--interactive', action='store_true', help='Allow owned native control input through stdin after OCR cannot locate a control')
     args = parser.parse_args()
     global INTERACTIVE
@@ -643,7 +648,7 @@ def main():
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
     study = Study(args.binary.resolve(), output)
     try:
-        if args.only in ('all', 'main'): study.main(args.resume_after_saves, args.resume_after_window)
+        if args.only in ('all', 'main'): study.main(args.resume_after_saves, args.resume_after_window, args.resume_before_clipboard)
         if args.only in ('all', 'restart'): study.restart(args.catalog_from or output / 'main-catalog.json')
         if args.only in ('all', 'errors'): study.errors()
         if args.only == 'launcher': study.launcher()
