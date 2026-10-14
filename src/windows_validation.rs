@@ -3,6 +3,8 @@
 use super::*;
 use std::path::PathBuf;
 
+mod matrix;
+
 #[derive(Debug, Clone)]
 enum FixtureMessage {
     App(Message),
@@ -33,6 +35,9 @@ pub fn run(root: PathBuf) -> iced::Result {
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(log::LevelFilter::Info);
     assert!(root.is_dir(), "create a fresh evidence directory first");
+    if std::env::var("HOORI_GUI_MATRIX").as_deref() == Ok("1") {
+        return matrix::run(root);
+    }
     let distro =
         std::env::var("HOORI_TEST_WSL_DISTRO").expect("explicit fixture distribution required");
     iced::application(

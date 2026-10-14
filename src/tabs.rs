@@ -124,25 +124,7 @@ pub struct Tab {
 
 impl Tab {
     fn new(id: TabId, shell: &Shell, size: GridSize) -> Self {
-        let program_name = std::path::Path::new(&shell.program)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let name = if program_name.eq_ignore_ascii_case("wsl.exe")
-            && shell
-                .args
-                .first()
-                .is_some_and(|arg| arg == "--distribution")
-        {
-            format!(
-                "{} · Bash",
-                shell.args.get(1).map(String::as_str).unwrap_or("WSL")
-            )
-        } else if program_name.eq_ignore_ascii_case("powershell.exe") {
-            "PowerShell 5.1".into()
-        } else {
-            program_name.into_owned()
-        };
+        let name = launch_label(shell);
         let shell = shell.clone();
         let (session, error) = match Session::spawn_in(
             &shell.program,
@@ -492,6 +474,38 @@ impl Tabs {
     }
 }
 
+fn launch_label(shell: &Shell) -> String {
+    let program_name = std::path::Path::new(&shell.program)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    if program_name.eq_ignore_ascii_case("wsl.exe")
+        && shell
+            .args
+            .first()
+            .is_some_and(|arg| arg == "--distribution")
+    {
+        let target = shell
+            .args
+            .iter()
+            .position(|arg| arg == "--exec")
+            .and_then(|index| shell.args.get(index + 1));
+        let name = match target.map(String::as_str) {
+            Some("/bin/bash" | "/usr/bin/bash") => "Bash",
+            Some("/bin/zsh" | "/usr/bin/zsh") => "zsh",
+            _ => "WSL",
+        };
+        format!(
+            "{} · {name}",
+            shell.args.get(1).map(String::as_str).unwrap_or("WSL")
+        )
+    } else if program_name.eq_ignore_ascii_case("powershell.exe") {
+        "PowerShell 5.1".into()
+    } else {
+        program_name.into_owned()
+    }
+}
+
 pub fn validated_name(name: &str) -> Result<Option<String>, String> {
     if name.chars().any(|c| {
             c.is_control()
@@ -509,4 +523,20 @@ pub fn validated_name(name: &str) -> Result<Option<String>, String> {
         ));
     }
     Ok((!name.is_empty()).then(|| name.to_owned()))
+}
+
+#[cfg(test)]
+mod launch_label_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_wsl_shell_labels_follow_the_launch_target() {
+        let mut shell = crate::launch::wsl("Ubuntu 24.04; data");
+        assert_eq!(launch_label(&shell), "Ubuntu 24.04; data · Bash");
+        let executable = shell.args.iter().position(|arg| arg == "--exec").unwrap() + 1;
+        shell.args[executable] = "/usr/bin/zsh".into();
+        assert_eq!(launch_label(&shell), "Ubuntu 24.04; data · zsh");
+        shell.args[executable] = "/usr/bin/other".into();
+        assert_eq!(launch_label(&shell), "Ubuntu 24.04; data · WSL");
+    }
 }
