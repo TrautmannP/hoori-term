@@ -28,6 +28,9 @@ Window, command, wait_for, click, start_time, children = [helpers[k] for k in
 geometry, resize, drag, native_state, maximized = [chrome[k] for k in
     ('geometry', 'resize', 'drag', 'native_state', 'maximized')]
 
+INTERACTIVE = False
+MANUAL = []
+
 RAW = qualification['FIXTURE'].replace('HOO10', 'HOO37')
 RAW = RAW.replace('COPY: Grüße 界\\nOwned HOO-10 clipboard fixture\\n',
                   'HOO37_SELECTION\\r\\nUTF-8: Grüße 界 e\\u0301\\r\\n')
@@ -127,9 +130,29 @@ def press(w, word, panel=False, scroll=False):
             time.sleep(.15)
             return
         if scroll:
-            wheel(w, 5, 3, panel)
+            wheel(w, 5, 1, panel)
         else:
             time.sleep(.2)
+    if INTERACTIVE:
+        wheel(w, 4, 30, panel)
+        while True:
+            path = w.output / f"manual-{len(MANUAL):02}-{normalized(word)}.png"
+            w.focus(); w.screenshot(path)
+            print(json.dumps({'manual_control': word, 'image': str(path), 'window': w.id, 'pid': w.process.pid,
+                              'commands': 'click X Y | up N | down N'}), flush=True)
+            instruction = input().strip().split()
+            if len(instruction) == 3 and instruction[0] == 'click':
+                x, y = map(int, instruction[1:])
+                bounds = geometry(w)
+                assert 0 <= x < bounds['WIDTH'] and 0 <= y < bounds['HEIGHT']
+                MANUAL.append({'control': word, 'action': ['click', x, y], 'image': str(path), 'window': w.id, 'pid': w.process.pid})
+                click(w, x, y); time.sleep(.2); return
+            if len(instruction) == 2 and instruction[0] in ['up', 'down']:
+                count = int(instruction[1]); assert 1 <= count <= 30
+                MANUAL.append({'control': word, 'action': instruction, 'image': str(path), 'window': w.id, 'pid': w.process.pid})
+                wheel(w, 4 if instruction[0] == 'up' else 5, count, panel)
+                continue
+            raise AssertionError('Invalid manual control instruction')
     raise AssertionError(f'Own visible control not found: {word}')
 
 
@@ -401,12 +424,7 @@ class Study:
         w, file = self.create('main-window', seed)
         first = self.track(w)[0]
         assert len(self.track(w)) == 1
-        self.edit_name(w, 'Scratch')
-        wheel(w, 4, 30); press(w, 'Aufnehmen', panel=True, scroll=True)
-        key(w, 'ctrl+shift+t')
-        self.shot(w, '13a-readable-disabled-draft.png')
-        assert len(self.track(w)) == 1
-        key(w, 'Escape'); self.capture(w, 'F10'); key(w, 'Return')
+        self.edit_name(w, 'Scratch'); self.capture(w, 'F10'); key(w, 'Return')
         self.activate(w, 'F9', 'Admin')
         bash_pid = next(p for p in self.track(w) if p != first)
         assert os.readlink(f'/proc/{bash_pid}/cwd') == str(admin_dir)
@@ -616,7 +634,10 @@ def main():
     parser.add_argument('--catalog-from', type=Path)
     parser.add_argument('--resume-after-saves', type=Path)
     parser.add_argument('--resume-after-window', type=Path)
+    parser.add_argument('--interactive', action='store_true', help='Allow owned native control input through stdin after OCR cannot locate a control')
     args = parser.parse_args()
+    global INTERACTIVE
+    INTERACTIVE = args.interactive
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11'
     assert shutil.which('tesseract'), 'Control location uses Tesseract, not an existing desktop window'
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
@@ -627,10 +648,12 @@ def main():
         if args.only in ('all', 'errors'): study.errors()
         if args.only == 'launcher': study.launcher()
         study.cleanup(); study.report['complete'] = True
+        study.report['manual_native_controls'] = MANUAL
         (output / 'report.json').write_text(json.dumps(study.report, ensure_ascii=False, indent=2))
         print(json.dumps({'complete': True, 'images': len(study.report['screenshots'])}), flush=True)
     except BaseException as error:
         study.report['error'] = repr(error)
+        study.report['manual_native_controls'] = MANUAL
         for index, w in enumerate(study.windows):
             if w.process.poll() is None:
                 try: study.shot(w, f'failure-{index}.png')
