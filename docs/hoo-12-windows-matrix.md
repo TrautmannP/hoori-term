@@ -27,7 +27,9 @@ layouts, IME composition or every driver. Inspect screenshots using the normal
 Windows computer-use tooling; activate the returned fixture window first.
 
 The fixture logs synthetic terminal grids only when explicitly enabled.
-Normal review builds contain neither this driver nor the graphics logger.
+Normal review builds contain neither this input driver nor its synthetic-grid
+logger. The separate explicit `HOORI_GRAPHICS_INFO=1` diagnostic can print only
+the selected compositor adapter; it is disabled during ordinary launches.
 Clipboard copy/paste uses iced's real Windows clipboard backend. The original
 text clipboard value is retained in memory and can be restored with the
 `restore_clipboard` action; it is never included in snapshots. Non-text clipboard

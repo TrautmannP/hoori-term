@@ -77,7 +77,10 @@ separate model tests. No real distribution is removed or converted for tests.
 For native GUI fixtures, build with the test-only `validation` feature, copy
 the binary out of Cargo's target directory, set HOORI_GUI_VALIDATION to a
 fresh existing evidence directory and set HOORI_TEST_WSL_DISTRO explicitly.
-The normal release does not contain this driver or its graphics logger.
+The normal release does not contain this fixture driver or its logger.
+The separate explicit `HOORI_GRAPHICS_INFO=1` diagnostic introduced for Ubuntu
+qualification can print only the selected compositor adapter; ordinary
+launches leave it disabled.
 Writing stage.txt requests one fixture step; each step records a JSON state.
 The driver exercises our input/action model inside the real iced window,
 ConPTY/WSL processes and native resize. Window captures are read-only.

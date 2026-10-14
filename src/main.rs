@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod graphics_info;
 mod symbols_view;
 mod tab_strip;
 mod view;
@@ -90,6 +91,7 @@ fn main() -> iced::Result {
             std::process::exit(2);
         }
     };
+    graphics_info::enable_if_requested();
     iced::application(move || App::boot(options.clone()), App::update, App::view)
         .title(App::title)
         .subscription(App::subscription)

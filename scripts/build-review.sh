@@ -51,6 +51,7 @@ Categories=System;TerminalEmulator;
 DESKTOP
 chmod 755 "$temporary/hoori-term.desktop"
 cp README.md "$temporary/README.md"
+cp -R docs "$temporary/docs"
 mv -- "$temporary" "$destination"
 trap - EXIT
 printf 'Review build: %s\nLaunch: %s/launch\n' "$destination" "$destination"
