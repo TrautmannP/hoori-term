@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use alacritty_terminal::grid::Dimensions;
 use hoori_term::session::ProcessState;
 use hoori_term::tabs::{CloseTarget, Shell, TabId, Tabs};

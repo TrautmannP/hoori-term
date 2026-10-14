@@ -205,6 +205,7 @@ fn prompt_exit_screens_and_reset_follow_record_lifetimes_without_time_heuristics
 }
 
 #[test]
+#[cfg(unix)]
 fn real_pty_capability_replies_return_to_their_source_and_exit_preserves_results() {
     use hoori_term::session::ProcessState;
     use hoori_term::tabs::{Accent, CloseTarget, Shell, Tabs};

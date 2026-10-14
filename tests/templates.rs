@@ -1,3 +1,6 @@
+// These are Ubuntu template paths/lifecycle checks. Windows template support
+// and its persistence matrix belong to HOO-14.
+#![cfg(unix)]
 use hoori_term::session::ProcessState;
 use hoori_term::shortcuts::Shortcut;
 use hoori_term::symbols::Symbol;

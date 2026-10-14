@@ -1,6 +1,6 @@
 # hoori-term
 
-A local native Rust terminal prototype for Ubuntu using iced/wgpu,
+A local native Rust terminal prototype for Ubuntu and Windows 11 x64 using iced/wgpu,
 alacritty_terminal and portable-pty. Multiple independent zsh/Bash tabs,
 selection, clipboard and bounded scrollback are available. Tabs can be named,
 colored and assigned their own direct shortcuts while their shells keep running.
@@ -18,10 +18,33 @@ own tab identity. Their runtime values are never saved in templates.
 
 ## Run
 
-Prerequisites: Rust 1.98.1 (pinned by `rust-toolchain.toml`), a C linker,
+On Windows 11 x64, the app discovers existing WSL distributions in the
+background and starts Bash in the configured WSL-2 default distribution.
+**+** offers the registered distributions and Windows PowerShell 5.1.
+WSL 1 remains visible but unavailable. Missing WSL or an unsupported default
+opens a notice and explicit selection; PowerShell never starts as a silent
+fallback. No distribution is installed, converted or reconfigured. A default
+such as `docker-desktop` that has no Bash leaves its error and exit status in
+its own tab; use **+** to select an Ubuntu distribution instead.
+
+Ctrl+Shift+T repeats the launch target; Ctrl+Shift+B opens target selection on
+Windows. Saved templates remain an Ubuntu feature pending their Windows
+integration. The shared tab features do not imply a completed Windows
+feature/platform qualification. See [Windows prototype validation](docs/hoo-11-windows.md).
+Windows prefers Vulkan/D3D12; an explicit `WGPU_BACKEND` override is preserved.
+
+```powershell
+cargo run --locked
+cargo run --locked -- --shell C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -- -NoLogo
+```
+
+Native Windows development needs the pinned Rust MSVC toolchain and Visual C++
+build tools. The review executable itself does not require Rust.
+
+Ubuntu prerequisites: Rust 1.98.1 (pinned by `rust-toolchain.toml`), a C linker,
 Ubuntu desktop with X11 or Wayland libraries and a working Vulkan/OpenGL driver,
 monospace fonts, and zsh (`/usr/bin/zsh`). The verified environment is Ubuntu
-24.04.5 x86_64 with X11; Wayland and Windows runtime checks remain pending.
+24.04.5 x86_64 with X11; native Wayland and the full Windows matrix remain pending.
 
 ```sh
 cargo run --locked
@@ -197,3 +220,10 @@ preserved. Run the absolute `launch` path printed by the script from any
 directory. The `.desktop` file can be opened with `gio launch` or installed
 in the local desktop application menu. These are local Ubuntu review
 artifacts, not a public installer or a Windows release.
+
+For a clean merged Windows x64 source checkout, `./scripts/build-review.ps1`
+creates `C:\Repos\hoori-term-builds\<full-commit>\` with the executable,
+`launch.ps1`, a `hoori-term.lnk` shortcut and full embedded build metadata.
+Existing versioned directories are preserved. The Windows preview requires
+Windows 11 x64 and, for WSL sessions, an existing WSL-2 distribution with Bash.
+The separate Ubuntu build remains available for cross-platform review.

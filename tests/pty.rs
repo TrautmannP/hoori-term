@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use hoori_term::session::{ProcessState, Session};
 use hoori_term::terminal::GridSize;
 use std::thread;

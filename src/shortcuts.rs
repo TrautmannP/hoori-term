@@ -26,6 +26,7 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Self::NewTab => "Neue Sitzung",
+            Self::NewBash if cfg!(windows) => "Sitzungsziel auswählen",
             Self::NewBash => "Neue Bash-Sitzung",
             Self::NextTab => "Nächster Tab",
             Self::PreviousTab => "Vorheriger Tab",

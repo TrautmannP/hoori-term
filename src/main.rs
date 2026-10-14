@@ -1,10 +1,15 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod symbols_view;
 mod tab_strip;
 mod view;
 mod window_chrome;
+#[cfg(all(windows, feature = "validation"))]
+mod windows_validation;
 
 use hoori_term::build_info;
 use hoori_term::input;
+use hoori_term::launch::Inventory;
 use hoori_term::notifications::Notifications;
 use hoori_term::session::ProcessState;
 use hoori_term::shortcuts::{self, Action, Shortcut};
@@ -29,8 +34,12 @@ impl Options {
     fn parse() -> Result<Option<Self>, String> {
         let mut args = std::env::args().skip(1);
         let mut options = Self {
-            shell: "/usr/bin/zsh".into(),
-            args: vec!["-i".into()],
+            shell: if cfg!(windows) { "" } else { "/usr/bin/zsh" }.into(),
+            args: if cfg!(windows) {
+                vec![]
+            } else {
+                vec!["-i".into()]
+            },
         };
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -40,7 +49,7 @@ impl Options {
                 }
                 "--help" => {
                     println!(
-                        "hoori-term [--shell /path/to/shell] [-- shell-arguments]\nDefault: /usr/bin/zsh -i\n--version prints embedded build identity."
+                        "hoori-term [--shell executable] [-- shell-arguments]\nDefault: WSL default distribution on Windows; /usr/bin/zsh -i on Ubuntu.\n--version prints embedded build identity."
                     );
                     return Ok(None);
                 }
@@ -52,11 +61,27 @@ impl Options {
                 _ => return Err(format!("Unknown argument: {arg}")),
             }
         }
+        if options.shell.is_empty() && !options.args.is_empty() {
+            return Err("Shell arguments under Windows require --shell".into());
+        }
         Ok(Some(options))
     }
 }
 
 fn main() -> iced::Result {
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        // The VMware OpenGL adapter omitted clipped geometry in HOO-11.
+        // Prefer native Vulkan/D3D12, preserving an explicit user override.
+        // Windows environment mutation is safe; this also precedes workers.
+        unsafe {
+            std::env::set_var("WGPU_BACKEND", "vulkan,dx12");
+        }
+    }
+    #[cfg(all(windows, feature = "validation"))]
+    if let Some(root) = std::env::var_os("HOORI_GUI_VALIDATION") {
+        return windows_validation::run(root.into());
+    }
     let options = match Options::parse() {
         Ok(Some(options)) => options,
         Ok(None) => return Ok(()),
@@ -100,6 +125,8 @@ enum Message {
     MoveTab(TabId, tab_strip::DropTarget),
     ChooseShell(usize),
     CancelLaunch,
+    #[cfg(windows)]
+    LaunchesLoaded(Inventory, bool),
     Activate(hoori_term::tabs::TabId),
     Close(hoori_term::tabs::CloseTarget),
     SetPinned(TabId, bool),
@@ -216,6 +243,8 @@ struct App {
     chrome: window_chrome::State,
     viewport_height: f32,
     launching: Option<usize>,
+    launches: Inventory,
+    discovering: bool,
     catalog: Catalog,
     template_file: Option<TemplateFile>,
     template_stamp: Option<Vec<u8>>,
@@ -238,7 +267,9 @@ impl App {
             directory: None,
         };
         let mut tabs = Tabs::default();
-        tabs.open(&default_shell, GridSize::new(98, 30)).unwrap();
+        if !default_shell.program.is_empty() {
+            tabs.open(&default_shell, GridSize::new(98, 30)).unwrap();
+        }
         Self {
             tabs,
             default_shell,
@@ -253,6 +284,8 @@ impl App {
             chrome: window_chrome::State::default(),
             viewport_height: 700.0,
             launching: None,
+            launches: Inventory::local(),
+            discovering: false,
             catalog: Catalog::default(),
             template_file: None,
             template_stamp: None,
@@ -269,9 +302,30 @@ impl App {
     }
 
     fn boot(options: Options) -> (Self, Task<Message>) {
+        #[cfg(windows)]
+        let auto_start = options.shell.is_empty();
         let mut app = Self::new(options);
-        let task = app.load_templates();
-        (app, task)
+        #[cfg(windows)]
+        {
+            app.discovering = true;
+            app.launches = Inventory::unavailable("WSL-Ziele werden ermittelt …".into());
+            let task = Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(hoori_term::launch::discover)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Inventory::unavailable("WSL-Ermittlung wurde unterbrochen".into())
+                        })
+                },
+                move |inventory| Message::LaunchesLoaded(inventory, auto_start),
+            );
+            (app, task)
+        }
+        #[cfg(not(windows))]
+        {
+            let task = app.load_templates();
+            (app, task)
+        }
     }
 
     fn load_templates(&mut self) -> Task<Message> {
@@ -397,7 +451,11 @@ impl App {
 
     fn title(&self) -> String {
         let Some(tab) = self.tabs.current() else {
-            return build_info::title("Wird beendet …");
+            return build_info::title(if self.closing {
+                "Wird beendet …"
+            } else {
+                "Neue Sitzung auswählen"
+            });
         };
         let title = if tab.terminal.shell_title.is_empty() {
             tab.description()
@@ -654,21 +712,23 @@ impl App {
             return Task::none();
         }
         if let Some(selected) = self.launching {
+            let count = self.launches.choices.len() + 1;
             return match key {
                 Key::Named(Named::Escape) => self.update(Message::CancelLaunch),
                 Key::Named(Named::Enter) | Key::Named(Named::Space) => {
-                    if selected < 2 {
+                    if selected < self.launches.choices.len() {
                         self.update(Message::ChooseShell(selected))
                     } else {
                         self.update(Message::CancelLaunch)
                     }
                 }
                 Key::Named(Named::ArrowUp | Named::ArrowLeft) => {
-                    self.launching = Some((selected + 2) % 3);
+                    self.launching = Some((selected + count - 1) % count);
                     Task::none()
                 }
                 Key::Named(Named::ArrowDown | Named::ArrowRight | Named::Tab) => {
-                    self.launching = Some((selected + if modifiers.shift() { 2 } else { 1 }) % 3);
+                    self.launching =
+                        Some((selected + if modifiers.shift() { count - 1 } else { 1 }) % count);
                     Task::none()
                 }
                 _ => Task::none(),
@@ -847,7 +907,17 @@ impl App {
                     return self.update(Message::SaveTemplate(id));
                 }
             }
+            Action::NewTab | Action::NewBash
+                if cfg!(windows) && self.default_shell.program.is_empty() =>
+            {
+                self.launching = Some(0);
+                return Task::none();
+            }
             Action::NewTab => return self.update(Message::Open(self.default_shell.clone())),
+            Action::NewBash if cfg!(windows) => {
+                self.launching = Some(0);
+                return Task::none();
+            }
             Action::NewBash => return self.update(Message::Open(Shell::bash())),
             Action::NextTab | Action::PreviousTab => {
                 self.tabs.cycle(action == Action::NextTab);
@@ -1043,6 +1113,28 @@ impl App {
         // Native window handling remains available on modal surfaces, just
         // like the OS close action. It never enters terminal key encoding.
         match message {
+            #[cfg(windows)]
+            Message::LaunchesLoaded(inventory, auto_start) => {
+                self.discovering = false;
+                self.launches = inventory;
+                if !self.closing && auto_start && self.tabs.items.is_empty() {
+                    if let Some(index) = self.launches.default {
+                        self.default_shell = self.launches.choices[index].shell.clone();
+                        if self.launching.is_none() {
+                            return self.update(Message::Open(self.default_shell.clone()));
+                        }
+                        return Task::none();
+                    }
+                    self.launching = Some(0);
+                }
+                return Task::none();
+            }
+            Message::ShowTemplates | Message::SaveTemplate(_) | Message::RetryLoad
+                if cfg!(windows) =>
+            {
+                self.error = Some("Vorlagen sind unter Windows noch nicht verfügbar.".into());
+                return Task::none();
+            }
             Message::WindowEvent(id, event) => return self.window_event(id, event),
             Message::WindowAction(action) => return self.window_action(action),
             Message::ObserveWindow => return self.observe_window(),
@@ -1284,12 +1376,17 @@ impl App {
             Message::ChooseShell(index) => {
                 // Only an explicit choice from the currently open menu starts
                 // a session; stale/repeated choice messages cannot start twice.
-                if self.launching.take().is_some() && index < 2 {
-                    return self.update(Message::Open(if index == 0 {
-                        Shell::zsh()
-                    } else {
-                        Shell::bash()
-                    }));
+                if !self.discovering
+                    && self.launching.is_some()
+                    && let Some(choice) = self.launches.choices.get(index)
+                    && choice.enabled
+                {
+                    let shell = choice.shell.clone();
+                    self.launching = None;
+                    if self.default_shell.program.is_empty() {
+                        self.default_shell = shell.clone();
+                    }
+                    return self.update(Message::Open(shell));
                 }
             }
             Message::CancelLaunch => self.launching = None,
@@ -1850,6 +1947,12 @@ impl App {
             header.into()
         };
         let mut content = column![header];
+        if self.discovering {
+            content =
+                content.push(container(text("WSL-Ziele werden ermittelt …").size(13)).padding(8));
+        } else if let Some(notice) = &self.launches.notice {
+            content = content.push(container(text(notice).size(13)).padding(8));
+        }
         if interactive
             && let Some(target @ (tab_strip::Target::Tab(id) | tab_strip::Target::Close(id))) =
                 self.strip.focused
@@ -1951,6 +2054,19 @@ impl App {
             );
         }
         let template_toolbar = container(template_toolbar).padding([4, 8]);
+        let template_toolbar: Element<'_, Message> = if cfg!(windows) {
+            container(
+                button(text("Titel/Status").size(12)).on_press_maybe(
+                    interactive
+                        .then(|| self.tabs.active.map(Message::InspectTab))
+                        .flatten(),
+                ),
+            )
+            .padding([4, 8])
+            .into()
+        } else {
+            template_toolbar.into()
+        };
         if let Some(error) = &self.storage_error {
             content = content.push(
                 container(
@@ -1979,14 +2095,48 @@ impl App {
             content = content.push(self.inspection_view(id));
         }
         if let Some(selected) = self.launching {
-            let choice = |label: &'static str, index: usize, message: Message| {
-                button(label).on_press(message).style(move |theme, status| {
-                    if selected == index {
-                        button::primary(theme, status)
+            let choice = |label: String, index: usize, message: Option<Message>| {
+                button(text(label))
+                    .width(if cfg!(windows) {
+                        iced::Length::Fill
                     } else {
-                        button::secondary(theme, status)
-                    }
-                })
+                        iced::Length::Shrink
+                    })
+                    .on_press_maybe(message)
+                    .style(move |theme, status| {
+                        if selected == index {
+                            button::primary(theme, status)
+                        } else {
+                            button::secondary(theme, status)
+                        }
+                    })
+            };
+            let mut choices = column![].spacing(6);
+            for (index, target) in self.launches.choices.iter().enumerate() {
+                choices = choices.push(choice(
+                    target.label.clone(),
+                    index,
+                    (target.enabled && !self.discovering).then_some(Message::ChooseShell(index)),
+                ));
+            }
+            choices = choices.push(choice(
+                "Abbrechen".into(),
+                self.launches.choices.len(),
+                Some(Message::CancelLaunch),
+            ));
+            let choices: Element<'_, Message> = if cfg!(windows) {
+                scrollable(choices)
+                    .height(((self.launches.choices.len() + 1) as f32 * 36.0).min(180.0))
+                    .into()
+            } else {
+                row![
+                    choice("zsh öffnen".into(), 0, Some(Message::ChooseShell(0))),
+                    choice("Bash öffnen".into(), 1, Some(Message::ChooseShell(1))),
+                    space::horizontal(),
+                    choice("Abbrechen".into(), 2, Some(Message::CancelLaunch)),
+                ]
+                .spacing(8)
+                .into()
             };
             content = content.push(
                 container(
@@ -1994,13 +2144,7 @@ impl App {
                         text("Neue Sitzung").size(18),
                         text("Shell bewusst auswählen · Pfeile/Tab, Enter · Esc bricht ab")
                             .size(12),
-                        row![
-                            choice("zsh öffnen", 0, Message::ChooseShell(0)),
-                            choice("Bash öffnen", 1, Message::ChooseShell(1)),
-                            space::horizontal(),
-                            choice("Abbrechen", 2, Message::CancelLaunch)
-                        ]
-                        .spacing(8),
+                        choices,
                     ]
                     .spacing(10),
                 )
@@ -2082,7 +2226,7 @@ impl App {
                 .padding(8)
                 .height(48),
             );
-        } else {
+        } else if self.closing {
             content = content.push(template_toolbar);
             content = content.push(
                 container(
@@ -2107,6 +2251,8 @@ impl App {
                 .padding(16)
                 .height(Fill),
             );
+        } else {
+            content = content.push(container(text("Über + eine Sitzung auswählen. Es wird keine Ersatz-Shell automatisch gestartet.")).padding(16).height(Fill));
         }
         stack([
             container(content).width(Fill).height(Fill).into(),
@@ -2419,7 +2565,89 @@ fn accent_style(
     style
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn empty() -> App {
+        App::new(Options {
+            shell: String::new(),
+            args: vec![],
+        })
+    }
+
+    #[test]
+    fn unavailable_or_wsl1_default_requires_deliberate_selection_and_stale_choices_cannot_duplicate()
+     {
+        for inventory in [
+            Inventory::unavailable("Missing WSL fixture".into()),
+            hoori_term::launch::parse("Legacy\nUbuntu", "* Legacy Stopped 1\nUbuntu Stopped 2")
+                .unwrap(),
+        ] {
+            let mut app = empty();
+            let _ = app.update(Message::LaunchesLoaded(inventory, true));
+            assert!(app.tabs.items.is_empty());
+            assert_eq!(app.launching, Some(0));
+            let _ = app.update(Message::ChooseShell(99));
+            assert!(app.tabs.items.is_empty());
+            let selected = app
+                .launches
+                .choices
+                .iter()
+                .position(|choice| choice.enabled)
+                .unwrap();
+            app.launches.choices[selected].shell.program =
+                "C:\\hoori-nonexistent-model-shell.exe".into();
+            let _ = app.update(Message::ChooseShell(selected));
+            assert_eq!(app.tabs.items.len(), 1);
+            let id = app.tabs.active;
+            let _ = app.update(Message::ChooseShell(selected));
+            assert_eq!(app.tabs.items.len(), 1);
+            assert_eq!(app.tabs.active, id);
+            assert!(matches!(
+                app.tabs.current().unwrap().state(),
+                ProcessState::Failed(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn late_discovery_cannot_launch_after_close_or_replace_an_explicit_launch() {
+        let inventory = hoori_term::launch::parse("Ubuntu", "* Ubuntu Running 2").unwrap();
+        let mut app = empty();
+        app.closing = true;
+        let _ = app.update(Message::LaunchesLoaded(inventory.clone(), true));
+        assert!(app.tabs.items.is_empty());
+        let mut app = App::new(Options {
+            shell: "C:\\hoori-nonexistent-model-shell.exe".into(),
+            args: vec![],
+        });
+        let id = app.tabs.active;
+        let _ = app.update(Message::LaunchesLoaded(inventory, false));
+        assert_eq!(app.tabs.active, id);
+        assert_eq!(app.tabs.items.len(), 1);
+    }
+
+    #[test]
+    fn supported_default_launches_its_exact_distribution_once() {
+        let mut inventory = hoori_term::launch::parse(
+            "Ubuntu Test\nOther",
+            "* Ubuntu Test Running 2\nOther Stopped 2",
+        )
+        .unwrap();
+        // Observe the selected spawn configuration without running a shell.
+        inventory.choices[0].shell.program = "C:\\hoori-nonexistent-model-shell.exe".into();
+        let mut app = empty();
+        let _ = app.update(Message::LaunchesLoaded(inventory.clone(), true));
+        assert_eq!(app.tabs.items.len(), 1);
+        assert_eq!(app.tabs.current().unwrap().shell.args[1], "Ubuntu Test");
+        assert!(app.launching.is_none());
+        let _ = app.update(Message::LaunchesLoaded(inventory, true));
+        assert_eq!(app.tabs.items.len(), 1);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use alacritty_terminal::index::Side;

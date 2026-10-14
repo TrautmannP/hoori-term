@@ -1005,12 +1005,14 @@ dependencies = [
  "alacritty_terminal",
  "base64",
  "iced",
+ "log",
  "nix 0.29.0",
  "portable-pty",
  "serde",
  "serde_json",
  "tokio",
  "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

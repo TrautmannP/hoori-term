@@ -43,6 +43,7 @@ pub struct Session {
     io_error: Arc<Mutex<Option<String>>>,
     stopping: Arc<AtomicBool>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    #[cfg(unix)]
     pid: Option<u32>,
     workers: Vec<JoinHandle<()>>,
 }
@@ -122,6 +123,7 @@ impl Session {
         #[cfg(target_os = "linux")]
         drop(directory_handle);
         drop(pair.slave);
+        #[cfg(unix)]
         let pid = child.process_id();
         let killer = child.clone_killer();
         let state = Arc::new(Mutex::new(ProcessState::Running));
@@ -136,11 +138,16 @@ impl Session {
         let wakeups = notifications.clone();
         let reader_thread = thread::spawn(move || {
             let mut buffer = [0; OUTPUT_CHUNK];
-            while !stop.load(Ordering::Relaxed) {
+            // ClosePseudoConsole can wait for its output to be drained. Keep
+            // reading through Windows shutdown, discarding only after stop.
+            while cfg!(windows) || !stop.load(Ordering::Relaxed) {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if output_tx.send(buffer[..n].to_vec()).is_err() {
+                        if !stop.load(Ordering::Relaxed)
+                            && output_tx.send(buffer[..n].to_vec()).is_err()
+                            && !cfg!(windows)
+                        {
                             break;
                         }
                         wakeups.wake();
@@ -150,9 +157,12 @@ impl Session {
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     // Linux reports EIO when the last slave closes.
+                    #[cfg(unix)]
                     Err(e) if e.raw_os_error() == Some(5) => break,
                     Err(e) => {
-                        *error.lock().unwrap() = Some(format!("PTY-Lesefehler: {e}"));
+                        if !stop.load(Ordering::Relaxed) {
+                            *error.lock().unwrap() = Some(format!("PTY-Lesefehler: {e}"));
+                        }
                         break;
                     }
                 }
@@ -210,6 +220,7 @@ impl Session {
             io_error,
             stopping,
             killer,
+            #[cfg(unix)]
             pid,
             workers: vec![reader_thread, writer_thread, waiter_thread],
         })
@@ -270,6 +281,14 @@ impl Session {
         self.stopping.store(true, Ordering::Relaxed);
         self.input.take();
         self.output.take(); // release a reader blocked on the bounded queue
+        #[cfg(windows)]
+        if let Some(writer) = self.workers.get(1) {
+            use std::os::windows::io::AsRawHandle;
+            // The owned thread remains alive until join; cancel only its I/O.
+            unsafe {
+                windows_sys::Win32::System::IO::CancelSynchronousIo(writer.as_raw_handle());
+            }
+        }
         #[cfg(unix)]
         let foreground = self.master.as_ref().and_then(|m| m.process_group_leader());
         #[cfg(unix)]
