@@ -83,7 +83,11 @@ impl Session {
                 Ok((handle, alias))
             })
             .transpose()?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        let directory_handle = directory
+            .map(crate::windows_fs::pin_directory)
+            .transpose()?;
+        #[cfg(not(any(target_os = "linux", windows)))]
         if directory.is_some_and(|path| !path.is_dir()) {
             return Err("Startverzeichnis ist nicht erreichbar oder kein Verzeichnis".into());
         }
@@ -107,7 +111,7 @@ impl Session {
         let mut command = CommandBuilder::new(program);
         command.args(args);
         if let Some(directory) = directory {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             let directory = directory_handle
                 .as_ref()
                 .map(|(_, alias)| alias.as_path())
@@ -120,7 +124,7 @@ impl Session {
             .slave
             .spawn_command(command)
             .map_err(|e| e.to_string())?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         drop(directory_handle);
         drop(pair.slave);
         #[cfg(unix)]

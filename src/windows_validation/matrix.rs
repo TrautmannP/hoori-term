@@ -1,4 +1,4 @@
-//! Explicit synthetic HOO-12 scenarios inside a real native iced window.
+//! Explicit synthetic Windows scenarios inside a real native iced window.
 //! Compiled only with `validation`; never attaches to existing sessions.
 use super::*;
 use alacritty_terminal::grid::Dimensions;
@@ -30,6 +30,29 @@ enum Action {
         shell: String,
     },
     OpenPowershell,
+    SaveTemplate {
+        tab: u64,
+    },
+    ShowTemplates,
+    OpenTemplate {
+        template: u64,
+    },
+    EditTemplate {
+        template: u64,
+    },
+    RemoveTemplate {
+        template: u64,
+    },
+    TemplateTarget {
+        shell: TemplateShell,
+        distribution: Option<String>,
+    },
+    Directory {
+        directory: String,
+    },
+    RetryLoad,
+    RetrySave,
+    DiscardAndExit,
     OpenMissing {
         wsl: bool,
     },
@@ -105,10 +128,29 @@ struct Matrix {
 pub(super) fn run(root: PathBuf) -> iced::Result {
     iced::application(
         move || {
-            let app = App::new(Options {
-                shell: String::new(),
-                args: vec![],
-            });
+            let (app, task) = if std::env::var("HOORI_GUI_TEMPLATES").as_deref() == Ok("1") {
+                let local = std::env::var_os("LOCALAPPDATA")
+                    .map(PathBuf::from)
+                    .expect("isolated LOCALAPPDATA required");
+                assert_eq!(
+                    local,
+                    root.join("local-app-data"),
+                    "never use the user's configuration in this fixture"
+                );
+                let shell = hoori_term::launch::powershell();
+                App::boot(Options {
+                    shell: shell.program,
+                    args: vec!["-NoLogo".into(), "-NoProfile".into()],
+                })
+            } else {
+                (
+                    App::new(Options {
+                        shell: String::new(),
+                        args: vec![],
+                    }),
+                    Task::none(),
+                )
+            };
             (
                 Matrix {
                     app,
@@ -118,7 +160,10 @@ pub(super) fn run(root: PathBuf) -> iced::Result {
                     clipboard_ready: false,
                     clipboard_matches: None,
                 },
-                iced::clipboard::read().map(MatrixMessage::OriginalClipboard),
+                Task::batch([
+                    task.map(MatrixMessage::App),
+                    iced::clipboard::read().map(MatrixMessage::OriginalClipboard),
+                ]),
             )
         },
         Matrix::update,
@@ -203,6 +248,28 @@ impl Matrix {
                 target.args.push("-NoProfile".into());
                 self.app.update(Message::Open(target))
             }
+            Action::SaveTemplate { tab } => self.app.update(Message::SaveTemplate(TabId(tab))),
+            Action::ShowTemplates => self.app.update(Message::ShowTemplates),
+            Action::OpenTemplate { template } => {
+                self.app.update(Message::OpenTemplate(TemplateId(template)))
+            }
+            Action::EditTemplate { template } => {
+                self.app.update(Message::EditTemplate(TemplateId(template)))
+            }
+            Action::RemoveTemplate { template } => self
+                .app
+                .update(Message::RemoveTemplate(TemplateId(template))),
+            Action::TemplateTarget {
+                shell,
+                distribution,
+            } => self.app.update(Message::EditTemplateTarget(TemplateTarget {
+                shell,
+                distribution,
+            })),
+            Action::Directory { directory } => self.app.update(Message::EditDirectory(directory)),
+            Action::RetryLoad => self.app.update(Message::RetryLoad),
+            Action::RetrySave => self.app.update(Message::RetrySave),
+            Action::DiscardAndExit => self.app.update(Message::DiscardAndExit),
             Action::OpenMissing { wsl } => {
                 let target = if wsl {
                     hoori_term::launch::wsl("hoori-nonexistent-test-distribution")
@@ -343,8 +410,8 @@ impl Matrix {
                 (0..tab.terminal.size.columns).map(|col| grid[Point::new(Line(i32::from(row) - offset as i32), Column(col as usize))].c).collect::<String>()
             }).collect();
             serde_json::json!({ "id": tab.id.0, "name": tab.label(), "original": tab.original_label(),
-                "identity": tab.identity, "state": format!("{:?}", tab.state()), "error": tab.error,
-                "shell": { "program": tab.shell.program, "args": tab.shell.args }, "title": tab.terminal.shell_title,
+                "identity": tab.identity, "template": tab.template, "state": format!("{:?}", tab.state()), "error": tab.error,
+                "shell": { "program": tab.shell.program, "args": tab.shell.args, "directory": tab.shell.directory }, "title": tab.terminal.shell_title,
                 "columns": tab.terminal.size.columns, "rows": tab.terminal.size.rows,
                 "history": grid.history_size(), "offset": offset,
                 "alternate": tab.terminal.term.mode().contains(TermMode::ALT_SCREEN),
@@ -355,8 +422,11 @@ impl Matrix {
             "title": self.app.title(), "active": self.app.tabs.active.map(|id| id.0), "tabs": tabs,
             "confirming": self.app.confirming.is_some(), "closing": self.app.closing,
             "pending_shutdowns": self.app.pending_shutdowns, "clipboard_matches": self.clipboard_matches,
-            "error": self.app.error, "launching": self.app.launching,
+            "error": self.app.error, "launching": self.app.launching, "discovering":self.app.discovering,
             "editor_error": self.app.editing.as_ref().and_then(|edit| edit.error.as_deref()),
+            "editor": self.app.editing.as_ref().map(|edit| serde_json::json!({"target":format!("{:?}",edit.target),"name":edit.name,"shell":edit.shell,"distribution":edit.wsl_distribution,"directory":edit.directory,"directory_pending":edit.directory_request.is_some()})),
+            "catalog": self.app.catalog, "templates_open":self.app.templates_open,
+            "storage": {"loaded":self.app.templates_loaded,"loading":self.app.templates_loading,"error":self.app.storage_error,"revision":self.app.revision,"saved_revision":self.app.saved_revision,"saving":self.app.saving},
             "choices": self.app.launches.choices.iter().map(|c| serde_json::json!({"label": c.label, "enabled": c.enabled})).collect::<Vec<_>>() });
         std::fs::write(
             self.root.join(format!("step-{}.json", self.last)),

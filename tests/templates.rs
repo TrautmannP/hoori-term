@@ -67,6 +67,7 @@ fn draft(name: &str, key: Named, directory: &str) -> Template {
             compact: false,
         },
         shell: TemplateShell::Bash,
+        wsl_distribution: None,
         directory: directory.into(),
         pinned: false,
     }
