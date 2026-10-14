@@ -49,6 +49,13 @@ fn powershell_51_interactive_utf8_resize_exit_and_shutdown() {
     session.write("Write-Output ('HOO_UTF8:' + 'Grüße 界'); Write-Output ('HOO_SIZE:' + [Console]::WindowWidth)\r".as_bytes().to_vec()).unwrap();
     let output = until(&session, &mut terminal, |s| s.contains("HOO_SIZE:112"));
     assert!(output.contains("HOO_UTF8:Grüße 界"));
+    session
+        .write(b"Write-Output 'HOO_EDIT:abXc'".to_vec())
+        .unwrap();
+    // PSReadLine must edit the interactive buffer, rather than merely echoing
+    // a preassembled command. Move before c, remove X, then submit the line.
+    session.write(b"\x1b[D\x1b[D\x7f\x1b[F\r".to_vec()).unwrap();
+    until(&session, &mut terminal, |s| s.contains("HOO_EDIT:abc"));
     session.write(b"exit 7\r".to_vec()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     while session.state() == ProcessState::Running && Instant::now() < deadline {
@@ -79,7 +86,7 @@ fn conpty_shutdown_releases_an_idle_reader_and_saturated_writer() {
 
 #[test]
 #[ignore = "requires explicit HOORI_TEST_WSL_DISTRO and a working WSL-2 Ubuntu installation"]
-fn wsl_bash_input_resize_and_targeted_close_preserve_foreign_session() {
+fn wsl_shell_input_resize_and_targeted_close_preserve_foreign_session() {
     let distro = std::env::var("HOORI_TEST_WSL_DISTRO").expect("set HOORI_TEST_WSL_DISTRO");
     let foreign = ForeignSession::start(&distro);
     let inventory = launch::discover();
@@ -89,7 +96,14 @@ fn wsl_bash_input_resize_and_targeted_close_preserve_foreign_session() {
             .iter()
             .any(|c| c.enabled && c.shell.args.get(1) == Some(&distro))
     );
-    let shell = launch::wsl(&distro);
+    let mut shell = launch::wsl(&distro);
+    let target = std::env::var("HOORI_TEST_WSL_SHELL").unwrap_or_else(|_| "bash".into());
+    assert!(matches!(target.as_str(), "bash" | "zsh"));
+    let executable = shell.args.iter().position(|arg| arg == "--exec").unwrap() + 1;
+    shell.args[executable] = format!("/bin/{target}");
+    if target == "zsh" {
+        shell.args.insert(executable + 1, "-f".into());
+    }
     let size = GridSize::new(80, 24);
     let mut sessions = Vec::new();
     for _ in 0..3 {
