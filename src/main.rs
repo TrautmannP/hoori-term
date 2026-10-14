@@ -21,7 +21,8 @@ use hoori_term::templates::{
 use hoori_term::terminal::GridSize;
 use iced::futures::StreamExt;
 use iced::widget::{
-    button, canvas, column, container, operation, row, scrollable, space, stack, text, text_input,
+    button, canvas, column, container, operation, pick_list, row, scrollable, space, stack, text,
+    text_input,
 };
 use iced::{Element, Event, Fill, Subscription, Task, Theme, keyboard, window};
 
@@ -168,7 +169,9 @@ enum Message {
     OpenTemplate(TemplateId),
     EditTemplate(TemplateId),
     RemoveTemplate(TemplateId),
-    EditShell(TemplateShell),
+    EditTemplateTarget(TemplateTarget),
+    #[cfg(windows)]
+    DefaultDirectoryLoaded(u64, Result<String, String>),
     EditDirectory(String),
     Loaded(Result<Loaded, String>),
     Saved(u64, Result<Saved, String>),
@@ -179,11 +182,25 @@ enum Message {
 
 use hoori_term::tabs::{Accent, CloseTarget, Identity, Shell, TabId, Tabs};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum EditorTarget {
     Tab(TabId),
     Save(TabId),
     Template(TemplateId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TemplateTarget {
+    shell: TemplateShell,
+    distribution: Option<String>,
+}
+impl std::fmt::Display for TemplateTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.distribution {
+            Some(name) => write!(f, "{name} · WSL 2 · {}", self.shell.label()),
+            None => f.write_str(self.shell.label()),
+        }
+    }
 }
 
 struct TabEditor {
@@ -194,7 +211,9 @@ struct TabEditor {
     recording: bool,
     error: Option<String>,
     shell: TemplateShell,
+    wsl_distribution: Option<String>,
     directory: String,
+    directory_request: Option<u64>,
     pinned: bool,
     symbol: Option<Symbol>,
     symbol_picker: Option<usize>,
@@ -225,6 +244,7 @@ impl TabEditor {
                 ..self.identity()
             },
             shell: self.shell,
+            wsl_distribution: self.wsl_distribution.clone(),
             directory: self.directory.clone(),
             pinned: self.pinned,
         })
@@ -258,6 +278,8 @@ struct App {
     saving: Option<u64>,
     templates_open: bool,
     selected_template: Option<TemplateId>,
+    #[cfg(windows)]
+    next_directory_request: u64,
     cache: canvas::Cache,
 }
 
@@ -299,6 +321,8 @@ impl App {
             saving: None,
             templates_open: false,
             selected_template: None,
+            #[cfg(windows)]
+            next_directory_request: 0,
             cache: canvas::Cache::new(),
         }
     }
@@ -321,7 +345,8 @@ impl App {
                 },
                 move |inventory| Message::LaunchesLoaded(inventory, auto_start),
             );
-            (app, task)
+            let load = app.load_templates();
+            (app, Task::batch([task, load]))
         }
         #[cfg(not(windows))]
         {
@@ -440,15 +465,105 @@ impl App {
             recording: false,
             error: None,
             shell: TemplateShell::for_shell(&tab.shell),
+            wsl_distribution: hoori_term::launch::wsl_context(&tab.shell)
+                .map(|(distro, _, _)| distro.to_owned()),
             directory: tab
                 .shell
                 .directory
                 .clone()
-                .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+                .or_else(|| {
+                    hoori_term::launch::wsl_context(&tab.shell)
+                        .and_then(|(_, _, directory)| directory.map(std::path::PathBuf::from))
+                })
+                .or_else(|| {
+                    if hoori_term::launch::wsl_context(&tab.shell).is_some() {
+                        None
+                    } else {
+                        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                            .map(std::path::PathBuf::from)
+                    }
+                })
                 .and_then(|p| p.into_os_string().into_string().ok())
                 .unwrap_or_default(),
+            directory_request: None,
         });
-        operation::focus("tab-name")
+        Task::batch([
+            operation::focus("tab-name"),
+            self.request_default_directory(),
+        ])
+    }
+
+    fn request_default_directory(&mut self) -> Task<Message> {
+        #[cfg(windows)]
+        if let Some(editor) = &mut self.editing
+            && !matches!(editor.target, EditorTarget::Tab(_))
+            && editor.directory.is_empty()
+            && let Some(distribution) = editor.wsl_distribution.clone()
+        {
+            self.next_directory_request = self.next_directory_request.wrapping_add(1);
+            let request = self.next_directory_request;
+            editor.directory_request = Some(request);
+            return Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || hoori_term::launch::wsl_home(&distribution))
+                        .await
+                        .unwrap_or_else(|_| Err("WSL-Home-Ermittlung wurde unterbrochen".into()))
+                },
+                move |result| Message::DefaultDirectoryLoaded(request, result),
+            );
+        }
+        Task::none()
+    }
+
+    fn template_targets(&self) -> Vec<TemplateTarget> {
+        if cfg!(windows) {
+            let mut targets = vec![TemplateTarget {
+                shell: TemplateShell::PowerShell,
+                distribution: None,
+            }];
+            for choice in self.launches.choices.iter().filter(|choice| choice.enabled) {
+                if let Some((distribution, _, _)) = hoori_term::launch::wsl_context(&choice.shell) {
+                    for shell in [TemplateShell::Bash, TemplateShell::Zsh] {
+                        targets.push(TemplateTarget {
+                            shell,
+                            distribution: Some(distribution.into()),
+                        });
+                    }
+                }
+            }
+            targets
+        } else {
+            [TemplateShell::Zsh, TemplateShell::Bash]
+                .into_iter()
+                .map(|shell| TemplateTarget {
+                    shell,
+                    distribution: None,
+                })
+                .collect()
+        }
+    }
+
+    fn template_target_error(&self, id: TemplateId) -> Option<String> {
+        if !cfg!(windows) || self.tabs.items.iter().any(|tab| tab.template == Some(id)) {
+            return None;
+        }
+        let distribution = self.catalog.get(id)?.wsl_distribution.as_deref()?;
+        if self.discovering {
+            return Some("WSL-Ziele werden noch ermittelt; bitte erneut öffnen.".into());
+        }
+        let choice = self.launches.choices.iter().find(|choice| {
+            hoori_term::launch::wsl_context(&choice.shell)
+                .is_some_and(|(name, _, _)| name == distribution)
+        });
+        match choice {
+            Some(choice) if choice.enabled => None,
+            Some(_) => Some(format!(
+                "WSL-Ziel „{distribution}“ ist nicht als WSL 2 verfügbar. Vorlage bleibt erhalten."
+            )),
+            None => Some(format!(
+                "WSL-Ziel „{distribution}“ fehlt oder WSL ist nicht verfügbar. Vorlage bleibt erhalten; Startziel bewusst bearbeiten."
+            )),
+        }
     }
 
     fn title(&self) -> String {
@@ -1131,10 +1246,20 @@ impl App {
                 }
                 return Task::none();
             }
-            Message::ShowTemplates | Message::SaveTemplate(_) | Message::RetryLoad
-                if cfg!(windows) =>
-            {
-                self.error = Some("Vorlagen sind unter Windows noch nicht verfügbar.".into());
+            #[cfg(windows)]
+            Message::DefaultDirectoryLoaded(request, result) => {
+                if let Some(editor) = &mut self.editing
+                    && editor.directory_request == Some(request)
+                {
+                    editor.directory_request = None;
+                    match result {
+                        Ok(directory) => editor.directory = directory,
+                        Err(error) => {
+                            editor.error =
+                                Some(format!("Startverzeichnis bitte selbst festlegen: {error}"))
+                        }
+                    }
+                }
                 return Task::none();
             }
             Message::WindowEvent(id, event) => return self.window_event(id, event),
@@ -1200,7 +1325,7 @@ impl App {
                     | Message::ShowSymbols
                     | Message::SelectSymbol(_)
                     | Message::CancelSymbols
-                    | Message::EditShell(_)
+                    | Message::EditTemplateTarget(_)
                     | Message::EditDirectory(_)
                     | Message::CaptureShortcut
                     | Message::ClearShortcut
@@ -1504,17 +1629,36 @@ impl App {
             }
             Message::Edit(id) => return self.begin_tab_edit(id, false),
             Message::SaveTemplate(id) => return self.begin_tab_edit(id, true),
-            Message::EditShell(shell) => {
-                if let Some(editor) = &mut self.editing {
-                    editor.shell = shell;
-                    editor.error = None;
+            Message::EditTemplateTarget(target) => {
+                if !self.template_targets().contains(&target) {
+                    if let Some(editor) = &mut self.editing {
+                        editor.error = Some("Dieses Startziel ist nicht mehr verfügbar".into());
+                    }
+                    return Task::none();
                 }
+                if let Some(editor) = &mut self.editing {
+                    let context_changed = editor.wsl_distribution != target.distribution;
+                    editor.shell = target.shell;
+                    editor.wsl_distribution = target.distribution;
+                    editor.error = None;
+                    if context_changed {
+                        editor.directory_request = None;
+                        editor.directory = if editor.wsl_distribution.is_some() {
+                            String::new()
+                        } else {
+                            std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                                .unwrap_or_default()
+                        };
+                    }
+                }
+                return self.request_default_directory();
             }
             Message::EditDirectory(directory) => {
                 if let Some(editor) = &mut self.editing
                     && !editor.recording
                 {
                     editor.directory = directory;
+                    editor.directory_request = None;
                     editor.error = None;
                 }
             }
@@ -1583,6 +1727,7 @@ impl App {
                 if let Some(editor) = &self.editing
                     && !editor.recording
                     && editor.symbol_picker.is_none()
+                    && editor.directory_request.is_none()
                 {
                     let result = match editor.target {
                         EditorTarget::Tab(id) => {
@@ -1654,6 +1799,10 @@ impl App {
             Message::HideTemplates => self.templates_open = false,
             Message::OpenTemplate(id) => {
                 if self.templates_loaded {
+                    if let Some(error) = self.template_target_error(id) {
+                        self.error = Some(error);
+                        return Task::none();
+                    }
                     let size = self
                         .tabs
                         .current()
@@ -1685,7 +1834,9 @@ impl App {
                         recording: false,
                         error: None,
                         shell: template.shell,
+                        wsl_distribution: template.wsl_distribution.clone(),
                         directory: template.directory.clone(),
+                        directory_request: None,
                         pinned: template.pinned,
                     });
                     return operation::focus("tab-name");
@@ -2005,7 +2156,9 @@ impl App {
             .align_y(iced::Center),
         ]
         .spacing(4);
-        if let Some(tab) = self.tabs.current() {
+        if !cfg!(windows)
+            && let Some(tab) = self.tabs.current()
+        {
             template_toolbar = template_toolbar.push(
                 row![
                     button(
@@ -2056,19 +2209,7 @@ impl App {
             );
         }
         let template_toolbar = container(template_toolbar).padding([4, 8]);
-        let template_toolbar: Element<'_, Message> = if cfg!(windows) {
-            container(
-                button(text("Titel/Status").size(12)).on_press_maybe(
-                    interactive
-                        .then(|| self.tabs.active.map(Message::InspectTab))
-                        .flatten(),
-                ),
-            )
-            .padding([4, 8])
-            .into()
-        } else {
-            template_toolbar.into()
-        };
+        let template_toolbar: Element<'_, Message> = template_toolbar.into();
         if let Some(error) = &self.storage_error {
             content = content.push(
                 container(
@@ -2306,7 +2447,7 @@ impl App {
                         .spacing(8),
                         text(format!(
                             "{} · {}{shortcut} · {state} · Symbol: {} · {} · {directory}",
-                            template.shell.label(),
+                            template.target_label(),
                             if template.pinned { "PIN · " } else { "" },
                             symbols::label(template.identity.symbol),
                             if template.identity.compact {
@@ -2448,13 +2589,34 @@ impl App {
         ]
         .spacing(10);
         if !matches!(editor.target, EditorTarget::Tab(_)) {
+            let selected = TemplateTarget {
+                shell: editor.shell,
+                distribution: editor.wsl_distribution.clone(),
+            };
+            let targets = self.template_targets();
+            let available = targets.contains(&selected);
             fields = fields.push(row![
                 text("Startziel").size(14).width(70),
-                button("zsh").on_press(Message::EditShell(TemplateShell::Zsh)).style(if editor.shell==TemplateShell::Zsh { button::primary } else { button::secondary }),
-                button("Bash").on_press(Message::EditShell(TemplateShell::Bash)).style(if editor.shell==TemplateShell::Bash { button::primary } else { button::secondary }),
+                pick_list(targets, Some(selected), Message::EditTemplateTarget)
+                    .width(Fill),
             ].spacing(8).align_y(iced::Center))
             .push(row![text("Verzeichnis").size(14).width(90),text_input("Absolutes Startverzeichnis",&editor.directory).id("template-directory").on_input_maybe((!editor.recording).then_some(Message::EditDirectory as fn(String)->Message)).size(14).padding(8)].spacing(8).align_y(iced::Center))
             .push(text("Startziel und Verzeichnis gelten beim nächsten neuen Prozess. Offene Tabs werden nicht neu gestartet.").size(12));
+            if !available {
+                fields = fields.push(text("Gespeichertes Ziel derzeit nicht verfügbar. Es bleibt erhalten; bei Bedarf bewusst ein anderes auswählen.").size(12));
+            }
+            fields = fields.push(
+                text(if editor.directory_request.is_some() {
+                    "Startverzeichnis wird im gewählten WSL-Ziel ermittelt …"
+                } else if editor.wsl_distribution.is_some() {
+                    "Linux-Pfad in dieser Distribution, z. B. /home/patrick/Projekte."
+                } else if cfg!(windows) {
+                    "Absoluter Windows-Pfad, z. B. C:\\Repos\\hoori-term."
+                } else {
+                    "Absoluter Linux-Pfad, z. B. /home/patrick/Projekte."
+                })
+                .size(12),
+            );
         }
         fields = fields.push(
             row![
@@ -2507,7 +2669,10 @@ impl App {
             button("Abbrechen")
                 .on_press(Message::CancelEdit)
                 .style(button::secondary),
-            button("Übernehmen").on_press_maybe((!editor.recording).then_some(Message::ApplyEdit)),
+            button("Übernehmen").on_press_maybe(
+                (!editor.recording && editor.directory_request.is_none())
+                    .then_some(Message::ApplyEdit)
+            ),
         ]
         .spacing(8);
         container(
@@ -2646,6 +2811,61 @@ mod windows_tests {
         assert!(app.launching.is_none());
         let _ = app.update(Message::LaunchesLoaded(inventory, true));
         assert_eq!(app.tabs.items.len(), 1);
+    }
+
+    #[test]
+    fn late_wsl_home_result_cannot_overwrite_user_input_or_a_changed_target() {
+        let mut app = empty();
+        app.launches = hoori_term::launch::parse("Ubuntu", "* Ubuntu Running 2").unwrap();
+        let id = app
+            .tabs
+            .open(
+                &Shell {
+                    program: "C:\\hoori-nonexistent-model-shell.exe".into(),
+                    args: vec![],
+                    directory: None,
+                },
+                GridSize::new(80, 24),
+            )
+            .unwrap();
+        app.tabs.get_mut(id).unwrap().shell = hoori_term::launch::wsl("Ubuntu");
+        let _ = app.update(Message::SaveTemplate(id));
+        let pending = app.editing.as_ref().unwrap().directory_request.unwrap();
+        let _ = app.update(Message::EditDirectory("/explicit/user/path".into()));
+        let _ = app.update(Message::DefaultDirectoryLoaded(
+            pending,
+            Ok("/late/home".into()),
+        ));
+        assert_eq!(
+            app.editing.as_ref().unwrap().directory,
+            "/explicit/user/path"
+        );
+        let _ = app.update(Message::EditTemplateTarget(TemplateTarget {
+            shell: TemplateShell::PowerShell,
+            distribution: None,
+        }));
+        let native_directory = app.editing.as_ref().unwrap().directory.clone();
+        let _ = app.update(Message::DefaultDirectoryLoaded(
+            pending,
+            Ok("/late/home".into()),
+        ));
+        let editor = app.editing.as_ref().unwrap();
+        assert_eq!(editor.shell, TemplateShell::PowerShell);
+        assert!(editor.wsl_distribution.is_none());
+        assert_eq!(editor.directory, native_directory);
+        let _ = app.update(Message::EditTemplateTarget(TemplateTarget {
+            shell: TemplateShell::Zsh,
+            distribution: Some("Ubuntu".into()),
+        }));
+        let editor = app.editing.as_ref().unwrap();
+        assert_eq!(editor.shell, TemplateShell::Zsh);
+        assert_eq!(editor.wsl_distribution.as_deref(), Some("Ubuntu"));
+        assert_ne!(editor.directory_request, Some(pending));
+        let _ = app.update(Message::ApplyEdit);
+        assert!(
+            app.catalog.items.is_empty(),
+            "pending WSL directory must not be saved"
+        );
     }
 }
 
@@ -3039,6 +3259,7 @@ mod tests {
                     id: TemplateId(0),
                     identity,
                     shell: TemplateShell::Bash,
+                    wsl_distribution: None,
                     directory: "/tmp".into(),
                     pinned: false,
                 },
@@ -3400,6 +3621,7 @@ mod tests {
                     id: TemplateId(0),
                     identity,
                     shell: TemplateShell::Bash,
+                    wsl_distribution: None,
                     directory: "/tmp".into(),
                     pinned: true,
                 },
@@ -3523,6 +3745,7 @@ mod tests {
                         compact: false,
                     },
                     shell: TemplateShell::Bash,
+                    wsl_distribution: None,
                     directory: "/tmp".into(),
                     pinned: false,
                 },

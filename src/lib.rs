@@ -10,3 +10,5 @@ pub mod symbols;
 pub mod tabs;
 pub mod templates;
 pub mod terminal;
+#[cfg(windows)]
+mod windows_fs;

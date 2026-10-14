@@ -82,6 +82,95 @@ pub fn wsl(distribution: &str) -> Shell {
     }
 }
 
+// Fixed launcher code. Both user-controlled values are positional argument
+// data; a failed cd exits before an interactive shell can start elsewhere.
+pub const WSL_DIRECTORY_SCRIPT: &str = "cd -P -- \"$1\" || exit; exec \"$2\" -i";
+
+pub fn wsl_in(distribution: &str, executable: &str, directory: &str) -> Shell {
+    Shell {
+        program: system_program("wsl.exe"),
+        args: vec![
+            "--distribution".into(),
+            distribution.into(),
+            "--exec".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            WSL_DIRECTORY_SCRIPT.into(),
+            "hoori-term-directory".into(),
+            directory.into(),
+            executable.into(),
+        ],
+        directory: None,
+    }
+}
+
+/// Recognize only our supported direct/wrapped WSL launch forms.
+pub fn wsl_context(shell: &Shell) -> Option<(&str, &str, Option<&str>)> {
+    if !std::path::Path::new(&shell.program)
+        .file_name()?
+        .eq_ignore_ascii_case("wsl.exe")
+    {
+        return None;
+    }
+    let distro = shell.args.iter().position(|arg| arg == "--distribution")?;
+    let distro = shell.args.get(distro + 1)?.as_str();
+    let exec = shell.args.iter().position(|arg| arg == "--exec")?;
+    let executable = shell.args.get(exec + 1)?.as_str();
+    if matches!(
+        executable,
+        "/bin/bash" | "/usr/bin/bash" | "/bin/zsh" | "/usr/bin/zsh"
+    ) {
+        let directory = shell
+            .args
+            .iter()
+            .position(|arg| arg == "--cd")
+            .and_then(|index| shell.args.get(index + 1))
+            .map(String::as_str)
+            .filter(|path| *path != "~");
+        return Some((distro, executable, directory));
+    }
+    let tail = &shell.args[exec + 1..];
+    if tail.len() == 6
+        && tail[0] == "/bin/sh"
+        && tail[1] == "-c"
+        && tail[2] == WSL_DIRECTORY_SCRIPT
+        && tail[3] == "hoori-term-directory"
+        && matches!(tail[5].as_str(), "/bin/bash" | "/usr/bin/zsh")
+    {
+        return Some((distro, &tail[5], Some(&tail[4])));
+    }
+    None
+}
+
+pub fn valid_distribution(name: &str) -> bool {
+    !name.is_empty() && name == name.trim() && name.len() <= 256 && !name.starts_with('-')
+        && !name.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+}
+
+#[cfg(windows)]
+pub fn wsl_home(distribution: &str) -> Result<String, String> {
+    if !valid_distribution(distribution) {
+        return Err("Ungültiges WSL-Ziel".into());
+    }
+    let bytes = command_output(
+        &[
+            "--distribution",
+            distribution,
+            "--cd",
+            "~",
+            "--exec",
+            "/bin/pwd",
+            "-P",
+        ],
+        15,
+    )?;
+    let path = decode(&bytes)?.trim_end_matches(['\r', '\n']).to_owned();
+    if !path.starts_with('/') || path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err("WSL-Home ist kein gültiges absolutes Startverzeichnis".into());
+    }
+    Ok(path)
+}
+
 /// wsl.exe emits UTF-16LE when redirected, but accepts UTF-8 on some versions.
 pub fn decode(bytes: &[u8]) -> Result<String, String> {
     if bytes.len() > 64 * 1024 {
@@ -185,8 +274,8 @@ pub fn parse(names: &str, verbose: &str) -> Result<Inventory, String> {
 #[cfg(windows)]
 pub fn discover() -> Inventory {
     let result = (|| {
-        let names = command_output(&["--list", "--quiet"])?;
-        let verbose = command_output(&["--list", "--verbose"])?;
+        let names = command_output(&["--list", "--quiet"], 5)?;
+        let verbose = command_output(&["--list", "--verbose"], 5)?;
         parse(&decode(&names)?, &decode(&verbose)?)
     })();
     result.unwrap_or_else(|error| {
@@ -197,7 +286,7 @@ pub fn discover() -> Inventory {
 }
 
 #[cfg(windows)]
-fn command_output(args: &[&str]) -> Result<Vec<u8>, String> {
+fn command_output(args: &[&str], timeout_seconds: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -206,11 +295,21 @@ fn command_output(args: &[&str]) -> Result<Vec<u8>, String> {
         .args(args)
         .creation_flags(0x08000000)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
+        // Drain both bounded output channels without exposing diagnostic
+        // contents. Starting a distribution can be slower than listing it.
+        .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("WSL-Aufruf fehlgeschlagen: {e}"))?;
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes.len())
+    });
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
@@ -218,7 +317,7 @@ fn command_output(args: &[&str]) -> Result<Vec<u8>, String> {
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -234,6 +333,13 @@ fn command_output(args: &[&str]) -> Result<Vec<u8>, String> {
         .join()
         .map_err(|_| "WSL-Liste konnte nicht gelesen werden")?
         .map_err(|_| "WSL-Liste konnte nicht gelesen werden")?;
+    let error_bytes = errors
+        .join()
+        .map_err(|_| "WSL-Fehlerkanal konnte nicht gelesen werden")?
+        .map_err(|_| "WSL-Fehlerkanal konnte nicht gelesen werden")?;
+    if error_bytes > 64 * 1024 {
+        return Err("WSL-Fehlerkanal überschreitet die Grenze".into());
+    }
     if !status?.success() {
         return Err("WSL ist nicht eingerichtet oder die Liste ist nicht lesbar".into());
     }
