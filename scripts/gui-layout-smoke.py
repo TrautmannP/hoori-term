@@ -6,6 +6,7 @@ known controls in those windows; it is never used as visual acceptance evidence.
 Inspect every retained PNG independently of state/PID/byte assertions.
 """
 import argparse
+import base64
 import csv
 import io
 import json
@@ -29,7 +30,7 @@ geometry, resize, drag, native_state, maximized = [chrome[k] for k in
 
 RAW = qualification['FIXTURE'].replace('HOO10', 'HOO37')
 RAW = RAW.replace('COPY: Grüße 界\\nOwned HOO-10 clipboard fixture\\n',
-                  'HOO37_SELECTION\\r\\nOwned HOO-37 clipboard fixture\\r\\n')
+                  'HOO37_SELECTION\\r\\nUTF-8: Grüße 界 e\\u0301\\r\\n')
 RAW = RAW.replace('paint(); save()\ntry:', '''needs_resize=True
 def resized(*_):
     global needs_resize
@@ -60,9 +61,16 @@ def clipboard(value):
 
 def send(w, value):
     clipboard(value)
-    w.key('ctrl+shift+v')
+    key(w, 'ctrl+shift+v')
     time.sleep(.12)
-    w.key('Return')
+    key(w, 'Return')
+
+
+def key(w, value):
+    w.key(value)
+    # xdotool returns before the native event/frame has completed. Give modal
+    # replacement and iced focus/scroll operations a frame before the next key.
+    time.sleep(.08)
 
 
 def wheel(w, direction, count=6, panel=True):
@@ -168,42 +176,47 @@ class Study:
         time.sleep(.3)
         return w, file
 
-    def activate(self, w, key, label):
-        w.key(key)
+    def activate(self, w, shortcut, label):
+        key(w, shortcut)
         wait_for(lambda: label in w.title())
 
     def edit_name(self, w, label):
-        w.key('ctrl+shift+e')
+        key(w, 'ctrl+shift+e')
         wait_for(lambda: 'Tab bearbeiten' in w.title())
-        w.key('ctrl+a'); w.type(label)
+        key(w, 'ctrl+a'); w.type(label)
 
-    def capture(self, w, key):
+    def capture(self, w, shortcut):
         wheel(w, 4, 30)
         press(w, 'Aufnehmen', panel=True, scroll=True)
-        w.key(key)
+        key(w, shortcut)
 
-    def save(self, w, file, name, directory, key, symbol_index, compact=False):
+    def save(self, w, file, name, directory, shortcut, symbol_index, compact=False):
         before = self.track(w)
-        w.key('ctrl+shift+s'); wait_for(lambda: 'Als Vorlage speichern' in w.title())
-        w.key('ctrl+a'); w.type(name)
-        w.key('Tab'); w.key('ctrl+a'); w.type(str(directory))
-        w.key('F6'); w.key('Home')
-        for _ in range(symbol_index): w.key('Right')
-        w.key('Return')
-        self.capture(w, key)
-        if compact: w.key('F7')
-        self.shot(w, f'save-{key.lower()}-draft.png')
+        key(w, 'ctrl+shift+s'); wait_for(lambda: 'Als Vorlage speichern' in w.title())
+        key(w, 'ctrl+a'); w.type(name)
+        key(w, 'Tab'); key(w, 'ctrl+a'); w.type(str(directory))
+        if shortcut == 'F8':
+            wheel(w, 4, 30)
+            press(w, 'zsh', panel=True, scroll=True); press(w, 'Bash', panel=True)
+            press(w, 'Bash', panel=True); press(w, 'zsh', panel=True)
+            assert 'Als Vorlage speichern' in w.title() and self.track(w) == before
+        key(w, 'F6'); key(w, 'Home')
+        for _ in range(symbol_index): key(w, 'Right')
+        key(w, 'Return')
+        self.capture(w, shortcut)
+        if compact: key(w, 'F7')
+        self.shot(w, f'save-{shortcut.lower()}-draft.png')
         press(w, 'Übernehmen', panel=True)
         wait_for(lambda: 'Als Vorlage speichern' not in w.title())
         wait_for(lambda: read_json(file) and any(t['identity']['name'] == name for t in read_json(file)['items']))
         assert self.track(w) == before
         template = next(t for t in read_json(file)['items'] if t['identity']['name'] == name)
         assert template['directory'] == str(directory)
-        assert template['identity']['shortcut']['key'] == key
+        assert template['identity']['shortcut']['key'] == shortcut
         return template['id']
 
     def details(self, w):
-        w.key('ctrl+shift+l'); w.key('i')
+        key(w, 'ctrl+shift+l'); key(w, 'i')
         wait_for(lambda: 'Titel/Status' in w.title())
 
     def raw(self, w, folder, tab):
@@ -228,7 +241,7 @@ class Study:
         self.track(w)
         w.request_close()
         if w.process.poll() is None:
-            w.key('Return')
+            key(w, 'Return')
         w.wait_exit()
 
     def main(self):
@@ -257,39 +270,44 @@ class Study:
         assert os.readlink(f'/proc/{zsh_pid}/cwd') == zsh_before
         self.activate(w, 'F8', 'Backend'); self.activate(w, 'F9', 'Admin')
         assert len(self.track(w)) == 3
-        w.key('ctrl+Tab')
+        key(w, 'ctrl+Tab')
         wait_for(lambda: 'zsh · 1' in w.title())
-        self.edit_name(w, 'Scratch'); self.capture(w, 'F10'); w.key('Return')
+        self.edit_name(w, 'Scratch'); self.capture(w, 'F10'); key(w, 'Return')
         wait_for(lambda: 'Tab bearbeiten' not in w.title() and 'Scratch' in w.title())
         assert len(read_json(file)['items']) == 12
         self.activate(w, 'F8', 'Backend'); backend_raw = self.raw(w, 'raw-backend', 3)
         self.activate(w, 'F9', 'Admin'); admin_raw = self.raw(w, 'raw-admin', 2)
         self.activate(w, 'F10', 'Scratch'); active_raw = self.raw(w, 'raw-scratch', 1)
+        runtime = ("\x1b]2;HOO37 long CLI;" + "界-title;" * 30 + "\x07"
+                   "\x1b]7501;state=blocked:kind=permission:app=fixture:progress=42\x07"
+                   "\x1b]7501;state=error:id=child:message=bGF5b3V0IGZpeHR1cmU=\x07").encode()
+        self.control(backend_raw, 'emit', bytes=base64.b64encode(runtime).decode())
         self.shot(w, '02-mixed-tabs-1000.png')
         self.phase('inactive-id-editor-conflicts-and-responsive-panels')
-        w.key('ctrl+shift+l'); w.key('End'); w.key('i')
+        key(w, 'ctrl+shift+l'); key(w, 'End'); key(w, 'i')
         wait_for(lambda: 'Titel/Status' in w.title() and 'Scratch' in w.title())
         self.shot(w, '03-inactive-target-details.png')
+        key(w, 'End'); self.shot(w, '03b-full-cli-details.png'); key(w, 'Home')
         press(w, 'Bearbeiten', panel=True, scroll=True)
         wait_for(lambda: 'Tab bearbeiten' in w.title())
-        w.key('ctrl+a'); w.type('Discarded draft')
+        key(w, 'ctrl+a'); w.type('Discarded draft')
         self.capture(w, 'F9'); self.shot(w, '04-duplicate-shortcut-visible.png')
-        w.key('ctrl+shift+t'); self.shot(w, '05-reserved-shortcut-visible.png')
-        w.key('Escape'); assert 'Tab bearbeiten' in w.title()
-        w.key('F6'); w.key('End'); resize(w, 640, 360)
+        key(w, 'ctrl+shift+t'); self.shot(w, '05-reserved-shortcut-visible.png')
+        key(w, 'Escape'); assert 'Tab bearbeiten' in w.title()
+        key(w, 'F6'); key(w, 'End'); resize(w, 640, 360)
         self.shot(w, '06-symbol-choice-640.png')
-        w.key('Escape'); assert 'Tab bearbeiten' in w.title()
+        key(w, 'Escape'); assert 'Tab bearbeiten' in w.title()
         self.shot(w, '07-draft-640.png')
-        w.key('Escape'); assert 'Tab bearbeiten' not in w.title()
+        key(w, 'Escape'); assert 'Tab bearbeiten' not in w.title()
         assert next(t for t in read_json(file)['items'] if t['id'] == backend)['identity']['name'] == 'Backend'
         assert self.track(w) == [first, bash_pid, zsh_pid] or set(self.track(w)) == {first, bash_pid, zsh_pid}
         for root in [backend_raw, admin_raw, active_raw]: assert read_json(root / 'proof.json')['input_hex'] == ''
         resize(w, 1280, 700)
-        w.key('ctrl+shift+l'); w.key('End'); w.key('i')
+        key(w, 'ctrl+shift+l'); key(w, 'End'); key(w, 'i')
         press(w, 'Bearbeiten', panel=True, scroll=True)
         wait_for(lambda: 'Tab bearbeiten' in w.title() and 'Scratch' in w.title())
-        w.key('ctrl+a'); w.type('Backend Grüße long stable identity'.ljust(40, 'x'))
-        w.key('F6'); w.key('End'); w.key('Return'); w.key('F7')
+        key(w, 'ctrl+a'); w.type('Backend Grüße long stable identity'.ljust(40, 'x'))
+        key(w, 'F6'); key(w, 'End'); key(w, 'Return'); key(w, 'F7')
         self.shot(w, '08-inline-editor-1280.png')
         sizes_inline = read_json(active_raw / 'proof.json')['sizes']
         assert sizes_inline[-1]['columns'] == (1280 - 196 - 320 - 20) // 10
@@ -303,18 +321,18 @@ class Study:
         resize(w, 640, 360)
         self.shot(w, '10-working-640.png')
         self.activate(w, 'F10', 'Scratch')
-        w.key('ctrl+shift+p'); w.key('End'); self.shot(w, '11-many-templates-640.png')
-        w.key('Home'); w.key('Delete'); wait_for(lambda: len(read_json(file)['items']) == 11)
-        w.key('Escape')
+        key(w, 'ctrl+shift+p'); key(w, 'End'); self.shot(w, '11-many-templates-640.png')
+        key(w, 'Home'); key(w, 'Delete'); wait_for(lambda: len(read_json(file)['items']) == 11)
+        key(w, 'Escape')
         press(w, 'Navigation'); press(w, 'Neue')
         wait_for(lambda: 'Neue Sitzung' in w.title())
-        self.shot(w, '12-shell-chooser-640.png'); w.key('Escape')
+        self.shot(w, '12-shell-chooser-640.png'); key(w, 'Escape')
         assert len(self.track(w)) == 3
-        self.activate(w, 'F9', 'Admin'); w.key('ctrl+shift+w')
+        self.activate(w, 'F9', 'Admin'); key(w, 'ctrl+shift+w')
         self.shot(w, '13-pin-close-protected-640.png')
         assert len(self.track(w)) == 3 and 'Schließen bestätigen' not in w.title()
         self.activate(w, 'F10', 'Scratch')
-        w.key('ctrl+shift+l'); w.key('Right'); w.key('alt+Left'); w.key('Escape')
+        key(w, 'ctrl+shift+l'); key(w, 'Right'); key(w, 'alt+Left'); key(w, 'Escape')
         self.phase('native-window-operations-and-real-pty-sizes')
         resize(w, 1000, 700)
         before, after = drag(w, 804, 26, 35, 20)
@@ -328,8 +346,8 @@ class Study:
         click(w, geometry(w)['WIDTH'] - 98, 26); wait_for(lambda: 'HIDDEN' in native_state(w))
         command('wmctrl', '-ia', w.id); wait_for(lambda: 'HIDDEN' not in native_state(w)); w.focus()
         assert 'Tab bearbeiten' in w.title()
-        w.request_close(); assert 'Schließen bestätigen' in w.title(); w.key('Escape')
-        assert 'Tab bearbeiten' in w.title(); w.key('Escape')
+        w.request_close(); assert 'Schließen bestätigen' in w.title(); key(w, 'Escape')
+        assert 'Tab bearbeiten' in w.title(); key(w, 'Escape')
         self.report['results']['native_modal_maximize_restore_minimize_close_cancel'] = True
         resize(w, 640, 600)
         self.control(active_raw, 'paint')
@@ -345,9 +363,9 @@ class Study:
         assert read_json(backend_raw / 'proof.json')['input_hex'] == ''
         assert read_json(admin_raw / 'proof.json')['input_hex'] == ''
         self.report['results']['exact_pty_input_hex'] = expected.hex()
-        self.activate(w, 'F9', 'Admin'); w.key('ctrl+shift+Home')
+        self.activate(w, 'F9', 'Admin'); key(w, 'ctrl+shift+Home')
         self.shot(w, '15-scrollback-640.png'); press(w, 'Live')
-        for _ in range(3): w.key('ctrl+shift+t')
+        for _ in range(3): key(w, 'ctrl+shift+t')
         wait_for(lambda: len(self.track(w)) == 6)
         resize(w, 640, 360)
         self.activate(w, 'F8', 'Backend')
@@ -374,24 +392,24 @@ class Study:
         assert len(self.track(w)) == 1
         self.shot(w, '19-restart-default-only.png')
         pids = self.track(w)
-        for key, target, executable in [('F8', backend, '/usr/bin/zsh'), ('F9', admin, '/usr/bin/bash')]:
-            self.activate(w, key, target['identity']['name'])
+        for shortcut, target, executable in [('F8', backend, '/usr/bin/zsh'), ('F9', admin, '/usr/bin/bash')]:
+            self.activate(w, shortcut, target['identity']['name'])
             pid = next(p for p in self.track(w) if p not in pids)
             pids.append(pid)
             assert os.readlink(f'/proc/{pid}/cwd') == target['directory']
             assert os.path.realpath(f'/proc/{pid}/exe') == executable
-            w.key(key); assert self.track(w) == sorted(pids)
+            key(w, shortcut); assert self.track(w) == sorted(pids)
         self.shot(w, '20-reopened-real-shells.png')
-        w.key('ctrl+shift+p'); w.key('End'); w.key('Up'); w.key('Delete')
+        key(w, 'ctrl+shift+p'); key(w, 'End'); key(w, 'Up'); key(w, 'Delete')
         wait_for(lambda: all(t['id'] != admin['id'] for t in read_json(file)['items']))
-        w.key('Escape')
+        key(w, 'Escape')
         assert set(self.track(w)) == set(pids)
         for _ in range(3):
             if 'Admin' in w.title(): break
-            w.key('ctrl+Tab')
+            key(w, 'ctrl+Tab')
         wait_for(lambda: 'Admin' in w.title())
         raw = self.raw(w, 'raw-unlinked-admin', 3)
-        w.key('F9'); w.type('!')
+        key(w, 'F9'); w.type('!')
         expected = b'\x1b[20~!'
         wait_for(lambda: read_json(raw / 'proof.json')['input_hex'] == expected.hex())
         self.shot(w, '21-removed-template-live-pin-retained.png')
@@ -408,7 +426,7 @@ class Study:
         valid = dict(version=1, next_id=1, order=[], items=[])
         file.write_text(json.dumps(valid))
         press(w, 'laden'); time.sleep(.4)
-        press(w, 'Navigation'); self.shot(w, '23-load-retry-preserves-file-640.png'); w.key('Escape')
+        press(w, 'Navigation'); self.shot(w, '23-load-retry-preserves-file-640.png'); key(w, 'Escape')
         assert read_json(file) == valid and len(self.track(w)) == 1
         self.close(w)
         self.phase('write-error-retry-while-editing-and-explicit-unsaved-exit')
@@ -420,7 +438,7 @@ class Study:
         lock = file.with_suffix('.lock')
         if lock.exists(): lock.unlink()
         lock.mkdir()
-        self.edit_name(w, 'Retry target'); w.key('Return')
+        self.edit_name(w, 'Retry target'); key(w, 'Return')
         wait_for(lambda: find_control(w, 'speichern'))
         assert file.read_bytes() == before
         resize(w, 640, 360)
@@ -429,12 +447,12 @@ class Study:
         lock.rmdir(); press(w, 'speichern')
         wait_for(lambda: read_json(file)['items'][0]['identity']['name'] == 'Retry target')
         assert 'Tab bearbeiten' in w.title() and self.track(w) == pids
-        self.shot(w, '25-retry-with-editor-actions-640.png'); w.key('Escape')
+        self.shot(w, '25-retry-with-editor-actions-640.png'); key(w, 'Escape')
         if lock.exists(): lock.unlink()
         lock.mkdir()
-        self.edit_name(w, 'Unsaved target'); w.key('Return')
+        self.edit_name(w, 'Unsaved target'); key(w, 'Return')
         wait_for(lambda: find_control(w, 'speichern'))
-        w.request_close(); w.key('Return')
+        w.request_close(); key(w, 'Return')
         wait_for(lambda: find_control(w, 'Ungespeichert'))
         self.shot(w, '26-explicit-unsaved-exit-640.png')
         assert read_json(file)['items'][0]['identity']['name'] == 'Retry target'
@@ -457,15 +475,15 @@ class Study:
         before = file.read_bytes(); pids = self.track(w)
         assert len(pids) == 1
         self.shot(w, 'final-01-normal-launch.png')
-        for key, name in [('F8', 'Backend review'), ('F9', 'Admin review')]:
-            self.activate(w, key, name)
+        for shortcut, name in [('F8', 'Backend review'), ('F9', 'Admin review')]:
+            self.activate(w, shortcut, name)
             pid = next(p for p in self.track(w) if p not in pids); pids.append(pid)
             assert os.readlink(f'/proc/{pid}/cwd') == '/tmp'
-            w.key(key); assert set(self.track(w)) == set(pids)
+            key(w, shortcut); assert set(self.track(w)) == set(pids)
         resize(w, 640, 360)
         self.edit_name(w, 'Final cancelled draft')
-        self.shot(w, 'final-02-narrow-editor.png'); w.key('Escape')
-        w.request_close(); self.shot(w, 'final-03-named-close.png'); w.key('Escape')
+        self.shot(w, 'final-02-narrow-editor.png'); key(w, 'Escape')
+        w.request_close(); self.shot(w, 'final-03-named-close.png'); key(w, 'Escape')
         assert set(self.track(w)) == set(pids) and file.read_bytes() == before
         self.close(w)
         self.report['results']['final_launcher_focus_only'] = True

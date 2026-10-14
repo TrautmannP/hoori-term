@@ -245,9 +245,17 @@ impl App {
                                 if selected { "› " } else { "" },
                                 template.name()
                             ))
-                            .size(13),
-                            text(format!("{} · {state}", template.target_label())).size(11),
-                            text(shortcut).size(11),
+                            .size(13)
+                            .width(Fill)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                            text(format!("{} · {state}", template.target_label()))
+                                .size(11)
+                                .width(Fill)
+                                .wrapping(text::Wrapping::WordOrGlyph),
+                            text(shortcut)
+                                .size(11)
+                                .width(Fill)
+                                .wrapping(text::Wrapping::WordOrGlyph),
                         ]
                         .spacing(2)
                     )
@@ -649,7 +657,12 @@ impl App {
         ]
         .spacing(8);
         for name in names {
-            details = details.push(text(format!("• {name}")).size(14));
+            details = details.push(
+                text(format!("• {name}"))
+                    .size(14)
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            );
         }
         let dialog = container(
             column![
@@ -891,6 +904,8 @@ impl App {
         if let Some(error) = &self.storage_error {
             fields = fields.push(
                 text(format!("Vorlagenspeicherung: {error}"))
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .size(12)
                     .color(colors::ERROR),
             );
@@ -1013,7 +1028,10 @@ impl App {
                 .style(colors::secondary)
         };
         let mut fields = column![
-            text(self.inspect_tab(id, false)).size(13).width(Fill),
+            text(self.inspect_tab(id, false))
+                .size(13)
+                .width(Fill)
+                .wrapping(text::Wrapping::WordOrGlyph),
             row![
                 action("Bearbeiten", TabAction::Edit),
                 action("Vorlage speichern / bearbeiten", TabAction::Save)
@@ -1053,10 +1071,17 @@ impl App {
             ),
             text(format!("Buildinformationen\n{}", build_info::metadata()))
                 .width(Fill)
+                .wrapping(text::Wrapping::WordOrGlyph)
                 .size(12)
                 .color(colors::MUTED),
-            text(format!("Titel/Status · {}", tab.description())).size(18),
-            text(format!("PTY-Prozess: {process}")).size(13),
+            text(format!("Titel/Status · {}", tab.description()))
+                .size(18)
+                .width(Fill)
+                .wrapping(text::Wrapping::WordOrGlyph),
+            text(format!("PTY-Prozess: {process}"))
+                .size(13)
+                .width(Fill)
+                .wrapping(text::Wrapping::WordOrGlyph),
             text(format!(
                 "Terminaltitel: {}",
                 if tab.terminal.shell_title.is_empty() {
@@ -1065,7 +1090,9 @@ impl App {
                     &tab.terminal.shell_title
                 }
             ))
-            .size(13),
+            .size(13)
+            .width(Fill)
+            .wrapping(text::Wrapping::WordOrGlyph),
             text(status.summary_label()).size(13),
             text(
                 "Vom Programm gemeldete Angaben · keine automatische Aktion · nur für diese Sitzung"
@@ -1074,11 +1101,18 @@ impl App {
         ]
         .spacing(8);
         if let Some(error) = &tab.error {
-            fields = fields.push(text(format!("PTY-/Eingabefehler: {error}")).size(12));
+            fields = fields.push(
+                text(format!("PTY-/Eingabefehler: {error}"))
+                    .size(12)
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            );
         }
         if let Some(error) = &self.error {
             fields = fields.push(
                 text(format!("Aktion: {error}"))
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .size(12)
                     .color(colors::ERROR),
             );
@@ -1086,6 +1120,8 @@ impl App {
         if let Some(error) = &self.storage_error {
             fields = fields.push(
                 text(format!("Vorlagenspeicherung: {error}"))
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .size(12)
                     .color(colors::ERROR),
             );
@@ -1108,21 +1144,38 @@ impl App {
                         .unwrap_or_default()
                 ))
                 .size(13)
+                .width(Fill)
+                .wrapping(text::Wrapping::WordOrGlyph)
                 .color(tab_strip::status_color(record.state)),
             ]
             .spacing(4);
             if let Some(app) = status.inherited_app(record) {
-                details = details.push(text(format!("Gemeldete Programmkennung: {app}")).size(12));
+                details = details.push(
+                    text(format!("Gemeldete Programmkennung: {app}"))
+                        .size(12)
+                        .width(Fill)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                );
             }
             if let Some(title) = &record.title {
-                details = details.push(text(format!("Bezeichnung: {title}")).size(13));
+                details = details.push(
+                    text(format!("Bezeichnung: {title}"))
+                        .size(13)
+                        .width(Fill)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                );
             }
             if let Some(progress) = record.progress {
                 details =
                     details.push(text(format!("Gemeldeter Fortschritt: {progress}%")).size(12));
             }
             if let Some(message) = &record.message {
-                details = details.push(text(format!("Meldung: {message}")).size(13));
+                details = details.push(
+                    text(format!("Meldung: {message}"))
+                        .size(13)
+                        .width(Fill)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                );
             }
             fields = fields.push(
                 container(details)
