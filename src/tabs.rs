@@ -124,10 +124,25 @@ pub struct Tab {
 
 impl Tab {
     fn new(id: TabId, shell: &Shell, size: GridSize) -> Self {
-        let name = std::path::Path::new(&shell.program)
+        let program_name = std::path::Path::new(&shell.program)
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
+        let name = if program_name.eq_ignore_ascii_case("wsl.exe")
+            && shell
+                .args
+                .first()
+                .is_some_and(|arg| arg == "--distribution")
+        {
+            format!(
+                "{} · Bash",
+                shell.args.get(1).map(String::as_str).unwrap_or("WSL")
+            )
+        } else if program_name.eq_ignore_ascii_case("powershell.exe") {
+            "PowerShell 5.1".into()
+        } else {
+            program_name.into_owned()
+        };
         let shell = shell.clone();
         let (session, error) = match Session::spawn_in(
             &shell.program,

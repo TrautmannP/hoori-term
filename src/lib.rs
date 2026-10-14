@@ -1,6 +1,7 @@
 pub mod build_info;
 mod control_stream;
 pub mod input;
+pub mod launch;
 pub mod notifications;
 pub mod program_status;
 pub mod session;

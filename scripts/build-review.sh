@@ -18,7 +18,8 @@ if [[ $(git rev-parse HEAD) != "$commit" || -n $(git status --porcelain --untrac
   echo 'Source changed while building; refusing to publish.' >&2
   exit 1
 fi
-metadata=$(target/release/hoori-term --version)
+binary="${CARGO_TARGET_DIR:-target}/release/hoori-term"
+metadata=$("$binary" --version)
 if [[ "$metadata" != *"commit: $commit"* || "$metadata" != *'dirty: false'* ]]; then
   echo 'Embedded build identity does not match clean HEAD.' >&2
   exit 1
@@ -26,7 +27,7 @@ fi
 mkdir -p -- "$build_root"
 temporary=$(mktemp -d "$build_root/.build-$commit-XXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT
-install -m 755 target/release/hoori-term "$temporary/hoori-term"
+install -m 755 "$binary" "$temporary/hoori-term"
 printf '%s\n' "$metadata" > "$temporary/BUILD-METADATA.txt"
 uname -sm >> "$temporary/BUILD-METADATA.txt"
 . /etc/os-release
