@@ -89,5 +89,8 @@ pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
 pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let mut style = text_input::default(theme, status);
     style.placeholder = MUTED;
+    if matches!(status, text_input::Status::Disabled) {
+        style.value = MUTED;
+    }
     style
 }

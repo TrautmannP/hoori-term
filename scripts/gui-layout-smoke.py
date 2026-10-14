@@ -265,7 +265,9 @@ class Study:
             key(w, 'Return')
         w.wait_exit()
 
-    def main(self, resume=None):
+    def main(self, resume=None, after_window=None):
+        if after_window:
+            return self.resume_window(after_window)
         self.phase('main-native-shell-starts-and-explicit-save')
         if resume:
             seed = read_json(resume)
@@ -387,22 +389,67 @@ class Study:
         assert len(self.track(w)) == 3 and 'Schließen bestätigen' not in w.title()
         self.activate(w, 'F10', 'Scratch')
         key(w, 'ctrl+shift+l'); key(w, 'Right'); key(w, 'alt+Left'); key(w, 'Escape')
+        self.finish_main(w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir)
+
+    def resume_window(self, source):
+        self.phase('remaining-native-window-clipboard-history-close')
+        seed = read_json(source)
+        admin_template = next(t for t in seed['items'] if t['identity']['shortcut'] and t['identity']['shortcut']['key'] == 'F9')
+        backend_template = next(t for t in seed['items'] if t['identity']['shortcut'] and t['identity']['shortcut']['key'] == 'F8')
+        admin, backend = admin_template['id'], backend_template['id']
+        admin_dir, backend_dir = Path(admin_template['directory']), Path(backend_template['directory'])
+        w, file = self.create('main-window', seed)
+        first = self.track(w)[0]
+        assert len(self.track(w)) == 1
+        self.edit_name(w, 'Scratch'); self.capture(w, 'F10'); key(w, 'Return')
+        self.activate(w, 'F9', 'Admin')
+        bash_pid = next(p for p in self.track(w) if p != first)
+        assert os.readlink(f'/proc/{bash_pid}/cwd') == str(admin_dir)
+        admin_raw = self.raw(w, 'raw-admin', 2)
+        self.activate(w, 'F8', backend_template['identity']['name'])
+        zsh_pid = next(p for p in self.track(w) if p not in [first, bash_pid])
+        assert os.readlink(f'/proc/{zsh_pid}/cwd') == str(backend_dir)
+        backend_raw = self.raw(w, 'raw-backend', 3)
+        self.activate(w, 'F10', 'Scratch'); active_raw = self.raw(w, 'raw-scratch', 1)
+        self.control(admin_raw, 'load', count=3000)
+        self.report['results']['remaining_after_window'] = {
+            'source_catalog': str(source),
+            'scope': 'Fresh owned sessions for the remaining minimize/return, close, clipboard, history and restart/error cases. Earlier editing/inactive-output/drag/resize/maximize assertions belong to their original report.',
+        }
+        self.finish_main(w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=False)
+
+    def finish_main(self, w, file, backend_raw, admin_raw, active_raw, first, bash_pid, zsh_pid, admin, backend, admin_dir, backend_dir, native_prefix=True):
         self.phase('native-window-operations-and-real-pty-sizes')
         resize(w, 1000, 700)
-        before, after = drag(w, 804, 26, 35, 20)
-        assert (after['X'], after['Y']) != (before['X'], before['Y'])
-        before, after = drag(w, 998, 350, -40, 0)
-        assert after['WIDTH'] < before['WIDTH']
-        self.report['results']['native_drag_resize'] = [before, after]
+        if native_prefix:
+            before, after = drag(w, 804, 26, 35, 20)
+            assert (after['X'], after['Y']) != (before['X'], before['Y'])
+            before, after = drag(w, 998, 350, -40, 0)
+            assert after['WIDTH'] < before['WIDTH']
+            self.report['results']['native_drag_resize'] = [before, after]
+        resize(w, 640, 360)
+        self.activate(w, 'F9', 'Admin'); self.details(w)
+        press(w, 'bewusst', panel=True, scroll=True)
+        wait_for(lambda: 'Schließen bestätigen' in w.title())
+        self.shot(w, '13b-explicit-pinned-close-target-640.png')
+        key(w, 'Escape'); assert len(self.track(w)) == 3
+        self.activate(w, 'F8', 'Backend'); key(w, 'ctrl+shift+w')
+        wait_for(lambda: 'Schließen bestätigen' in w.title())
+        self.shot(w, '13c-ordinary-close-target-640.png')
+        key(w, 'Escape'); assert len(self.track(w)) == 3
+        self.activate(w, 'F10', 'Scratch'); resize(w, 1000, 700)
+        self.report['results']['named_individual_pin_and_ordinary_cancel_preserve_all_sessions'] = True
         self.edit_name(w, 'Window draft')
-        click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: maximized(w))
-        click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: not maximized(w))
+        if native_prefix:
+            click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: maximized(w))
+            click(w, geometry(w)['WIDTH'] - 62, 26); wait_for(lambda: not maximized(w))
+            self.report['results']['native_maximize_restore'] = True
         click(w, geometry(w)['WIDTH'] - 98, 26); wait_for(lambda: 'HIDDEN' in native_state(w))
-        command('wmctrl', '-ia', w.id); wait_for(lambda: 'HIDDEN' not in native_state(w)); w.focus()
+        command('xdotool', 'windowactivate', '--sync', w.id); wait_for(lambda: 'HIDDEN' not in native_state(w)); w.focus()
         assert 'Tab bearbeiten' in w.title()
         w.request_close(); assert 'Schließen bestätigen' in w.title(); key(w, 'Escape')
         assert 'Tab bearbeiten' in w.title(); key(w, 'Escape')
-        self.report['results']['native_modal_maximize_restore_minimize_close_cancel'] = True
+        self.report['results']['native_minimize_os_return_and_modal_close_cancel'] = True
         resize(w, 640, 600)
         self.control(active_raw, 'paint')
         clipboard('HOO37 synthetic pre-copy fixture')
@@ -536,8 +583,12 @@ class Study:
             pid = next(p for p in self.track(w) if p not in pids); pids.append(pid)
             assert os.readlink(f'/proc/{pid}/cwd') == '/tmp'
             key(w, shortcut); assert set(self.track(w)) == set(pids)
-        resize(w, 640, 360)
         self.edit_name(w, 'Final cancelled draft')
+        press(w, 'Blau', panel=True)
+        self.capture(w, 'ctrl+shift+t')
+        self.shot(w, 'final-02a-readable-disabled-draft.png')
+        key(w, 'Escape')
+        resize(w, 640, 360)
         self.shot(w, 'final-02-narrow-editor.png'); key(w, 'Escape')
         w.request_close(); self.shot(w, 'final-03-named-close.png'); key(w, 'Escape')
         assert set(self.track(w)) == set(pids) and file.read_bytes() == before
@@ -559,13 +610,14 @@ def main():
     parser.add_argument('--only', choices=['all', 'main', 'restart', 'errors', 'launcher'], default='all')
     parser.add_argument('--catalog-from', type=Path)
     parser.add_argument('--resume-after-saves', type=Path)
+    parser.add_argument('--resume-after-window', type=Path)
     args = parser.parse_args()
     assert os.environ.get('XDG_SESSION_TYPE') == 'x11'
     assert shutil.which('tesseract'), 'Control location uses Tesseract, not an existing desktop window'
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
     study = Study(args.binary.resolve(), output)
     try:
-        if args.only in ('all', 'main'): study.main(args.resume_after_saves)
+        if args.only in ('all', 'main'): study.main(args.resume_after_saves, args.resume_after_window)
         if args.only in ('all', 'restart'): study.restart(args.catalog_from or output / 'main-catalog.json')
         if args.only in ('all', 'errors'): study.errors()
         if args.only == 'launcher': study.launcher()
