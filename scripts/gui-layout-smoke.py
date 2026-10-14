@@ -227,7 +227,7 @@ class Study:
         key(w, 'Home')
         for _ in range(index): key(w, 'Right')
         key(w, 'Return')
-        wait_for(lambda: find_control(w, 'Farbe', panel=True))
+        wait_for(lambda: find_control(w, 'Übernehmen', panel=True))
 
     def details(self, w):
         key(w, 'ctrl+shift+l'); key(w, 'i')

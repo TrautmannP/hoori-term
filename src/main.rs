@@ -1723,7 +1723,10 @@ impl App {
                 {
                     editor.symbol = symbol;
                     editor.symbol_picker = None;
-                    return operation::focus("tab-name");
+                    return Task::batch([
+                        operation::snap_to("tab-editor-fields", operation::RelativeOffset::START),
+                        operation::focus("tab-name"),
+                    ]);
                 }
             }
             Message::EditCompact(compact) => {
@@ -1741,7 +1744,10 @@ impl App {
             Message::CancelSymbols => {
                 if let Some(editor) = &mut self.editing {
                     editor.symbol_picker = None;
-                    return operation::focus("tab-name");
+                    return Task::batch([
+                        operation::snap_to("tab-editor-fields", operation::RelativeOffset::START),
+                        operation::focus("tab-name"),
+                    ]);
                 }
             }
             Message::ClearShortcut => {
