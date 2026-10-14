@@ -86,14 +86,21 @@ def words(w):
     w.focus()
     png = subprocess.run(['import', '-window', w.id, 'png:-'], check=True,
                          capture_output=True).stdout
+    # Enlarge the owned capture for small labels on solid buttons. This is an
+    # ephemeral OCR input; retained PNGs remain the unmodified native captures.
+    png = subprocess.run(['convert', 'png:-', '-resize', '200%', 'png:-'], input=png,
+                         check=True, capture_output=True).stdout
     result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'eng',
                              '--psm', '11', 'tsv'], input=png, check=True,
                             capture_output=True).stdout.decode()
-    return list(csv.DictReader(io.StringIO(result), delimiter='\t'))
+    items = list(csv.DictReader(io.StringIO(result), delimiter='\t'))
+    for item in items:
+        for field in ('left', 'top', 'width', 'height'): item[field] = str(int(item[field]) // 2)
+    return items
 
 
 def normalized(value):
-    return ''.join(c for c in unicodedata.normalize('NFKD', value.casefold()) if not unicodedata.combining(c)).strip(' .:/')
+    return ''.join(c for c in unicodedata.normalize('NFKD', value.casefold()) if not unicodedata.combining(c)).strip(' -.:/›>+•')
 
 
 def find_control(w, word, panel=False):
@@ -219,7 +226,7 @@ class Study:
         key(w, 'Home')
         for _ in range(index): key(w, 'Right')
         key(w, 'Return')
-        wait_for(lambda: find_control(w, 'Aufnehmen', panel=True))
+        wait_for(lambda: find_control(w, 'Farbe', panel=True))
 
     def details(self, w):
         key(w, 'ctrl+shift+l'); key(w, 'i')
