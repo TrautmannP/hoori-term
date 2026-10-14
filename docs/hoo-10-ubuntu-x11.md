@@ -27,7 +27,10 @@ _NET_WM_PID and native focus before input and capture; it never targets an
 existing terminal or captures the desktop. Every fixture uses fresh local
 configuration directories, known synthetic clipboard values and tracked child
 PIDs. Existing clipboard contents are not read. ZDOTDIR points to an empty
-fixture directory; real user configuration files are not rewritten.
+fixture directory with an empty .zshrc to bypass zsh-newuser-install; real user
+configuration files are not rewritten. Default/menu startup probes verify that
+the very first command writes the exact expected file, so a setup dialog
+consuming its first byte cannot be hidden by a later marker.
 
 Generated commands enter through the ordinary native paste path; Vim Unicode
 input, app shortcuts and raw-byte probes also exercise native keyboard input.
@@ -61,6 +64,8 @@ the default `--only all`. A concrete failed phase can be continued with
 `--only zsh`, `--only bash`, `--only default` or `--only errors`, retaining the
 original failed attempt and mapping exact evidence/source versions. Do not
 repeat unrelated successful phases solely for a new hash or test-helper fix.
+The focused `--only startup` continuation checks both default-launch modes and a
+deliberate Bash-to-zsh menu start, without rerunning the functional shell rows.
 
 ## Bundled scenarios
 
