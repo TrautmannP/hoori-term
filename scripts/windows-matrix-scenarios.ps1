@@ -47,8 +47,10 @@ if($Phase -eq 'row-start') {
         Send-MatrixText "Clear-Host; Write-Output ('HOO_ROW:' + 'ps51'); Write-Output ('UTF8:' + 'Grüße 界'); Write-Host 'RED' -ForegroundColor Red -NoNewline; Write-Host ' GREEN' -ForegroundColor Green -NoNewline; Write-Host ' BLUE' -ForegroundColor Blue; Write-Output ('SHELL_VERSION:' + `$PSVersionTable.PSVersion); Write-Output ('SHELL_PID:' + `$PID)" -Enter
     }
     $marker="HOO_ROW:$($target.tag)"
-    $state=Wait-Matrix {param($s) (Test-MatrixText $s $id $marker) -and (Test-MatrixText $s $id 'UTF8:Grüße 界')} "$marker UTF8"
-    if(-not $target.distro){Assert-Matrix (Test-MatrixText $state $id 'SHELL_VERSION:5.1.') 'Actual PowerShell 5.1 version missing'}
+    $versionMarker=if($target.distro){'SHELL_VERSION:'}else{'SHELL_VERSION:5.1.'}
+    # PTY output may span several UI ticks; the earlier UTF8 marker is not a
+    # completion signal for the later version line, especially in PowerShell.
+    $state=Wait-Matrix {param($s) (Test-MatrixText $s $id $marker) -and (Test-MatrixText $s $id 'UTF8:Grüße 界') -and (Test-MatrixText $s $id $versionMarker)} "$marker UTF8 and shell version"
     Save-Checkpoint "row-$Row-colors" $state
     return
 }
