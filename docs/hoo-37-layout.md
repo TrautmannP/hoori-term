@@ -52,30 +52,3 @@ errors remain in navigation/details/editor as appropriate. Failed persistence
 is never described as saved, existing files are preserved, and the shutdown
 view retains retry and explicit unsaved exit. The catalog/file/launch/session
 models and their persistence rules are unchanged by this issue.
-
-## Validation and delivery
-
-Use the pinned toolchain and documented fmt, strict all-target/all-feature
-Clippy, workspace tests and whitespace gates. The model regression covers
-inactive-ID actions, stale/forged panel clicks, editor/navigation command
-isolation, resize while editing and the template return context. The existing
-real two-PTY routing regression also checks navigation/panel consumption and
-immediate active-PTY input after dismissal.
-
-`scripts/gui-layout-smoke.py` uses freshly spawned, PID-verified X11 windows,
-isolated synthetic configuration and only synthetic clipboard content. Control
-location additionally needs Tesseract (English OCR); OCR is not visual acceptance. Its
-bundled final-candidate run covers normal and minimum-size layouts, both real
-shells, explicit templates/drafts/conflicts, independent pin/compact/order,
-active/inactive output, resize/window operations, clipboard routing,
-restart/removal and storage/start errors. Inspect every PNG; byte/PID/title
-assertions alone do not establish rendering. Narrow continuation options
-avoid repeating already valid scenarios after a concrete failure.
-
-The review artifact's `VALIDATION.md` maps actual runs, inherited unchanged
-paths, clean candidate/final commits and limitations. Earlier dirty layout
-previews are diagnostics, and the old clean build supplies the native
-before-layout images. The final merged Ubuntu build includes an absolute
-launcher, embedded full commit metadata and a persistent short title hash.
-No Windows runtime result, Wayland qualification, image-paste implementation,
-new theme system or GitHub pipeline is claimed here.

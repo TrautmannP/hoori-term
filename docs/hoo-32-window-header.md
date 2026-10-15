@@ -67,37 +67,3 @@ Real geometry, PTY dimensions and screenshots must establish whether the tested
 desktop honored each request. Unsupported or untested compositor behavior must
 remain an explicit validation gap. No new global shortcuts, fullscreen mode,
 snap menu, geometry persistence, multiwindow feature or CI pipeline is added.
-
-## Targeted validation
-
-The local gates are `cargo fmt --all -- --check`,
-`cargo clippy --workspace --all-targets --locked -- -D warnings`,
-`cargo test --workspace --locked` and `git diff --check`. Model/action tests cover
-border routing, late native-state observations, header targets, repeated own and
-native close requests, cancellation and exact real-PTY input isolation.
-
-`scripts/gui-window-chrome-smoke.py ABSOLUTE_LAUNCHER NEW_OUTPUT_DIRECTORY`
-runs one bundled X11 exercise against an owned new window and isolated local
-template fixtures. It needs xdotool, xprop, xwininfo, xrandr, xclip, ImageMagick
-`import` and wmctrl (the baseline does not need wmctrl). It checks three mixed
-Bash/zsh sessions, native movement,
-terminal selection at an edge, keyboard maximize, external restore, double-click,
-all eight resize directions with actual PTY dimensions, minimize/OS return with
-continued inactive output, modal close/cancel, exact bracketed paste/input bytes,
-twelve long-name tabs at 640/1280 pixels, stable template identities, an exited
-tab and a failed default session. The report separates native geometry/process
-assertions from screenshots; every image requires inspection.
-
-`--baseline` captures the preceding decorated build's equivalent three/twelve
-tab layouts. It does not assert the new native operations. `--only window`,
-`--only layouts` and `--only empty` allow focused follow-up after a concrete
-failure. Failed attempts remain evidence of that attempt and are not relabeled
-as complete passes. Clipboard fixtures replace only synthetic test data; no
-preexisting clipboard contents are read.
-
-AV-01 applies: run the changed paths during implementation, bundle the required
-acceptance exercise on a finished committed candidate, and reuse valid unchanged
-terminal/template evidence with its actual commit and path. After merge, verify
-the final clean review launcher's identity and changed header path without
-repeating unrelated full GUI suites. The versioned artifact's `VALIDATION.md`
-records actual commits, environment/scaling, results and remaining platform gaps.

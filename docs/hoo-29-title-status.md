@@ -88,15 +88,6 @@ catalog isolation, inactive updates, navigation, inspection input routing and
 close cancellation. These synthetic fixtures do not prove an actual CLI's
 protocol support.
 
-The bundled `scripts/gui-status-smoke.py` uses isolated owned configurations and
-synthetic clipboard/PTY fixtures. Its optional CLI phase runs installed Codex and
-Claude in an empty test directory through `cli-protocol-observer.py`. That opt-in
-bridge records only bounded OSC 0/2/7501 metadata and fixed capability responses,
-not a terminal transcript or user input. Exact installed versions, invocation
-arguments and actual observed signals belong in the versioned build's report.
-Synthetic CLI status fixtures must never be reported as actual Codex/Claude
-integration. Codex title configuration is not evidence of OSC 7501 support.
-
 References: [xterm title controls](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html),
 [official OpenAI Docs: Codex /title](https://learn.chatgpt.com/docs/developer-commands#configure-terminal-title-items-with-title),
 [Claude terminal status](https://code.claude.com/docs/en/terminal-config#see-session-status-in-your-terminal).

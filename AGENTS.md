@@ -213,6 +213,13 @@ An implementation issue needs:
   `cargo test --workspace`, plus the issue's relevant integration checks.
 - Add meaningful tests for changed behavior and regressions. Documentation-only
   edits do not require a mirrored test suite. Run `git diff --check` for changes.
+- Keep the per-issue gate fast: cover new behavior with Rust tests at the
+  state/model level (and real-PTY tests where bytes matter). Do not add a new
+  per-feature GUI automation script, and do not drive the UI by OCR. Real-window
+  X11 runs are limited to `scripts/gui-smoke.py` when window/rendering/input
+  paths change and `scripts/gui-ubuntu-qualification.py` for milestone
+  qualification. Visual and feature acceptance happens on Patrick's review build.
+  Patrick decided this on 2026-10-16 after per-issue GUI runs took up to an hour.
 - Distinguish compile checks, automated runtime tests, GUI checks, and manual
   platform evidence. Linux or cross-compilation does not prove Windows runtime
   behavior. Missing Windows/WSL or display access remains an explicit gap.

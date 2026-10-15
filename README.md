@@ -190,30 +190,23 @@ cargo test --workspace --locked
 git diff --check
 ```
 
-There is deliberately no GitHub CI pipeline. See [the spike evidence](docs/hoo-6-spike.md)
-for the GUI validation procedure, actual observations and integration limits.
-The [multi-session validation](docs/hoo-7-sessions.md) covers the follow-up
-tests and X11 GUI/clipboard exercise. The [tab-identity validation](docs/hoo-8-identity.md)
-covers editing, conflicts and direct shortcut routing. The current
-[Ubuntu/X11 qualification](docs/hoo-10-ubuntu-x11.md) covers both Bash and zsh
-on the same source commit. Native Wayland is deferred; Windows runtime evidence
-is tracked separately.
-The [refresh comparison](docs/hoo-15-refresh-comparison.md) records the bounded
-HOO-15 `top`/GNOME investigation, raw evidence, timing limits and follow-up proposal.
-The [connected tab-strip validation](docs/hoo-19-tab-strip.md) describes the
-HOO-19 layout, input routing and real comparison/regression procedure.
-The [template validation](docs/hoo-13-templates.md) covers HOO-13 configuration,
-stable links, asynchronous storage and the bundled X11 restart/error exercise.
-The [window-header validation](docs/hoo-32-window-header.md) covers native window
-operations, focus, reserved geometry and the targeted X11 evidence procedure.
-The [pinning validation](docs/hoo-17-pinning.md) covers stable groups, protected
-close, the stored pin field and the bundled X11 restart/write-error exercise.
-The [symbol validation](docs/hoo-22-symbols.md) covers the original native catalog,
-keyboard/mouse selection, optional stable IDs and targeted GUI/storage evidence.
-The [compact-view validation](docs/hoo-24-compact.md) covers independent pin/view
-combinations, mixed-width geometry, full details and stored presentation.
-The [tab-order validation](docs/hoo-26-order.md) defines deliberate drag/keyboard
-reordering, stable saved neighbors, reopening, legacy data and targeted evidence.
+There is deliberately no GitHub CI pipeline. These checks are the per-issue gate
+and take seconds; new behavior is covered by Rust tests at the state/model level.
+
+Real-window X11 automation is kept to two scripts and is not a per-issue gate:
+`scripts/gui-smoke.py` checks the actual window, terminal input/rendering, resize
+and build title (see [the spike](docs/hoo-6-spike.md)), and
+`scripts/gui-ubuntu-qualification.py` runs only for milestone qualification
+(see [Ubuntu/X11 qualification](docs/hoo-10-ubuntu-x11.md)). Visual and
+feature review happens on the versioned review build. Native Wayland is deferred;
+Windows runtime evidence is tracked separately.
+
+Feature behavior notes: [sessions](docs/hoo-7-sessions.md),
+[tab identity](docs/hoo-8-identity.md), [templates](docs/hoo-13-templates.md),
+[pinning](docs/hoo-17-pinning.md), [tab strip](docs/hoo-19-tab-strip.md),
+[symbols](docs/hoo-22-symbols.md), [compact view](docs/hoo-24-compact.md),
+[tab order](docs/hoo-26-order.md), [titles/status](docs/hoo-29-title-status.md),
+[window header](docs/hoo-32-window-header.md), [layout](docs/hoo-37-layout.md).
 
 ## Versioned review builds
 

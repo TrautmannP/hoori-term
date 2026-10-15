@@ -54,7 +54,7 @@ Existing direct assignments, model IDs, output queues and parsing budgets are
 unchanged. Every running close still requires the named D-06 confirmation;
 cancel preserves processes, and an exited tab closes without process confirmation.
 
-## Implementation and tests
+## Implementation
 
 `src/tab_strip.rs` owns drawing, layout, clipped hit testing, scrolling and focus
 targets. Its native iced canvas publishes stable `TabId` targets to the existing
@@ -64,45 +64,6 @@ and clipped foreground geometry use separate ordered frame drafts.
 `unicode-width` was already present transitively; it is now a direct pinned
 dependency for display truncation. No browser/runtime service is added.
 
-Model tests cover overflow/reveal/hit targets at 640/1280 logical pixels and
-identity after reorder. App tests cover no-start/cancel, exactly one deliberate
-shell choice, stale actions and modal blocking. Existing real raw-mode PTY
-readers additionally verify strip focus/menu cancellation and direct actions add
-no hidden bytes while ordinary terminal input still arrives exactly. Existing
-identity, bounded transport, inactive output and targeted shutdown tests remain.
-
-Run the README's format, Clippy, workspace tests and whitespace checks. Real X11
-GUI evidence is generated with fresh owned windows and synthetic fixtures:
-
-```sh
-cargo build --release --locked
-python3 scripts/gui-tab-strip-smoke.py /home/patrick/Projekte/hoori-term-builds/8fc02d691b0c819ceecab73681e56f275aeb95b0/launch /tmp/hoo19-before --baseline
-python3 scripts/gui-tab-strip-smoke.py target/release/hoori-term /tmp/hoo19-after
-python3 scripts/gui-identity-smoke.py target/release/hoori-term /tmp/hoo19-identity
-python3 scripts/gui-tabs-smoke.py target/release/hoori-term /tmp/hoo19-tabs
-python3 scripts/gui-smoke.py target/release/hoori-term /tmp/hoo19-terminal
-```
-
-The comparison driver uses the same three normal names/accents/shortcuts and
-twelve 40-character names (including a duplicate pair and Unicode), real shell
-state and unchanged display environment. It records actual 640/1280 × 700 X11
-window geometry and desktop text scale/DPI. Long names are pasted from an exact
-synthetic clipboard fixture; the harness replaces the clipboard and never reads
-prior clipboard contents. Other harness prerequisites are listed in HOO-6/7.
-
-The new flow checks hover/focus, menu open/cancel/one Bash start, exact raw input,
-all twelve shortcut/PID/state targets, first/last visibility after navigation,
-full-name inspection, inactive duplicate-name close/cancel, the surviving equal
-name, exit markers and close without confirmation, window cancel/cleanup and an
-unavailable-shell error. The baseline mode records the older appearance and
-same fixture states, not a pass for the new behavior. Keep every failed attempt
-separate; inspect all images rather than accepting JSON flags as visual proof.
-
-After merge, repeat the GUI flows through the absolute versioned launcher from
-clean final source. The artifact's `VALIDATION.md`, reports, local-check log and
-checksums record the actual results, before/after views, final full hash and
-desktop launcher. A dirty development run does not replace this final evidence.
-
 ## Boundaries
 
 This slice changes the strip and its actions. It preserves the existing editor,
@@ -110,11 +71,3 @@ dialogs, footer tools, clipboard, terminal renderer and session lifecycle;
 their complete redesign is not included. No templates, pinning, new icons,
 compact mode, sorting, theme settings or notification-scheduling correction is
 introduced. HOO-15's measurements and any follow-up remain separate.
-
-Available native runtime evidence is Ubuntu 24.04.5 x86_64/X11 on display :1,
-GNOME Shell 46.0, NVIDIA GTX 1070/580.178.04, scale 1, zsh 5.9 and Bash 5.2.21.
-The unchanged renderer's actual selected wgpu API/adapter is not logged.
-Native Ubuntu 24.04/26.04 Wayland and Windows/WSL/PowerShell still need their
-agreed environments and same-final-commit matrix. Font shaping/fallback,
-HiDPI/IME and complete layout/protocol certification remain existing limits.
-No GitHub pipeline or full-matrix/product acceptance is claimed by this delivery.
